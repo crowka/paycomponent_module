@@ -8,11 +8,35 @@ import { AnalyticsDashboard } from './components/analytics/AnalyticsDashboard';
 import { ComplianceDashboard } from './components/compliance/ComplianceDashboard';
 
 
-
 // Import our dashboard components
 import { PaymentDashboard } from './components/payments/PaymentDashboard';
 import { AnalyticsDashboard } from './components/analytics/AnalyticsDashboard';
 import { ComplianceDashboard } from './components/compliance/ComplianceDashboard';
+
+
+import { BrowserRouter as Router } from 'react-router-dom';
+import { PaymentProvider } from './lib/payment/contexts/PaymentContext';
+import { DashboardRoutes } from './routes';
+
+const App: React.FC = () => {
+  const providerConfig = {
+    apiKey: import.meta.env.VITE_STRIPE_PUBLIC_KEY,
+    environment: 'development'
+  };
+
+  return (
+    <Router>
+      <PaymentProvider 
+        providerName="stripe" 
+        config={providerConfig}
+      >
+        <DashboardRoutes />
+      </PaymentProvider>
+    </Router>
+  );
+};
+
+export default App;
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState({
