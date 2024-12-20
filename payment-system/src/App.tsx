@@ -1,63 +1,12 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { DashboardLayout } from './components/dashboard/Layout';
-import { useState } from 'react';
-
 import { PaymentManagement } from './components/payment';
 import { AnalyticsDashboard } from './components/analytics/AnalyticsDashboard';
 import { ComplianceDashboard } from './components/compliance/ComplianceDashboard';
-
-
-// Import our dashboard components
 import { PaymentDashboard } from './components/payments/PaymentDashboard';
-import { AnalyticsDashboard } from './components/analytics/AnalyticsDashboard';
-import { ComplianceDashboard } from './components/compliance/ComplianceDashboard';
-
-
-import { BrowserRouter as Router } from 'react-router-dom';
 import { PaymentProvider } from './lib/payment/contexts/PaymentContext';
 import { DashboardRoutes } from './routes';
-
-const App: React.FC = () => {
-  const providerConfig = {
-    apiKey: import.meta.env.VITE_STRIPE_PUBLIC_KEY,
-    environment: 'development'
-  };
-
-  return (
-    <Router>
-      <PaymentProvider 
-        providerName="stripe" 
-        config={providerConfig}
-      >
-        <DashboardRoutes />
-      </PaymentProvider>
-    </Router>
-  );
-};
-
-export default App;
-
-export default function App() {
-  const [currentUser, setCurrentUser] = useState({
-    id: '1',
-    name: 'Test User',
-    email: 'test@example.com'
-  });
-
-  return (
-    <Router>
-      <DashboardLayout>
-        <Routes>
-          <Route path="/" element={<MainDashboard />} />
-          <Route path="/payments" element={<PaymentDashboard />} />
-          <Route path="/analytics" element={<AnalyticsDashboard />} />
-          <Route path="/compliance" element={<ComplianceDashboard />} />
-        </Routes>
-      </DashboardLayout>
-    </Router>
-  );
-}
 
 const MainDashboard = () => {
   const stats = [
@@ -141,17 +90,36 @@ const SystemStatus = () => {
     </div>
   );
 };
-export default function App() {
+
+const App: React.FC = () => {
+  const [currentUser] = useState({
+    id: '1',
+    name: 'Test User',
+    email: 'test@example.com'
+  });
+
+  const providerConfig = {
+    apiKey: import.meta.env.VITE_STRIPE_PUBLIC_KEY,
+    environment: 'development'
+  };
+
   return (
     <Router>
-      <DashboardLayout>
-        <Routes>
-          <Route path="/" element={<MainDashboard />} />
-          <Route path="/payments" element={<PaymentManagement />} />
-          <Route path="/analytics" element={<AnalyticsDashboard />} />
-          <Route path="/compliance" element={<ComplianceDashboard />} />
-        </Routes>
-      </DashboardLayout>
+      <PaymentProvider 
+        providerName="stripe" 
+        config={providerConfig}
+      >
+        <DashboardLayout>
+          <Routes>
+            <Route path="/" element={<MainDashboard />} />
+            <Route path="/payments" element={<PaymentManagement />} />
+            <Route path="/analytics" element={<AnalyticsDashboard />} />
+            <Route path="/compliance" element={<ComplianceDashboard />} />
+          </Routes>
+        </DashboardLayout>
+      </PaymentProvider>
     </Router>
   );
-}
+};
+
+export default App;
