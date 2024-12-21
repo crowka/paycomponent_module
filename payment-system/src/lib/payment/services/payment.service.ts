@@ -1,4 +1,3 @@
-// src/lib/payment/services/payment.service.ts
 import { 
   PaymentProviderInterface,
   CreatePaymentInput,
@@ -6,31 +5,49 @@ import {
   PaymentMethod,
   AddPaymentMethodInput
 } from '../types/provider.types';
-import { validatePaymentInput } from '../utils/validation';
-import { encrypt, decrypt } from '../utils/encryption';
+import { ITransactionRepository } from '../repositories/transaction.repository';
+import { PaymentValidator } from '../validators/payment.validator';
 import { PaymentLogger } from '../utils/logger';
+import { encrypt } from '../utils/encryption';
+import { Transaction, TransactionStatus } from '../types';
+
+interface PaymentServiceOptions {
+  logLevel?: 'debug' | 'info' | 'warn' | 'error';
+}
 
 export class PaymentService {
   private logger: PaymentLogger;
 
   constructor(
     private provider: PaymentProviderInterface,
+    private transactionRepository: ITransactionRepository,
+    private validator: PaymentValidator,
     private options: PaymentServiceOptions = {}
   ) {
     this.logger = new PaymentLogger(options.logLevel || 'info');
   }
 
   async processPayment(input: CreatePaymentInput): Promise<PaymentResult> {
+    // Create initial transaction record
+    const transaction = await this.createTransaction(input);
+    
     try {
       // Validate input
-      validatePaymentInput(input);
+      await this.validator.validate(input);
 
       // Encrypt sensitive data
       const encryptedData = await this.encryptSensitiveData(input);
 
-      // Process payment
+      // Process payment with provider
       this.logger.info('Processing payment', { amount: input.amount });
       const result = await this.provider.createPayment(encryptedData);
+
+      // Update transaction status
+      await this.updateTransactionStatus(
+        transaction.id, 
+        result.success ? TransactionStatus.COMPLETED : TransactionStatus.FAILED,
+        result
+      );
 
       // Log result
       if (result.success) {
@@ -41,6 +58,8 @@ export class PaymentService {
 
       return result;
     } catch (error) {
+      // Handle error and update transaction
+      await this.handlePaymentError(transaction.id, error);
       this.logger.error('Payment processing error', { error });
       throw error;
     }
@@ -90,28 +109,12 @@ export class PaymentService {
     }
   }
 
-  private async encryptSensitiveData(data: CreatePaymentInput): Promise<CreatePaymentInput> {
-    if (typeof data.paymentMethod === 'object') {
-      return {
-        ...data,
-        paymentMethod: {
-          ...data.paymentMethod,
-          details: await encrypt(data.paymentMethod.details)
-        }
-      };
-    }
-    return data;
-  }
-
-  private maskSensitiveData(data: Record<string, any>): Record<string, any> {
-    const masked = { ...data };
-    if (masked.cardNumber) {
-      masked.cardNumber = `****${masked.cardNumber.slice(-4)}`;
-    }
-    return masked;
-  }
-}
-
-interface PaymentServiceOptions {
-  logLevel?: 'debug' | 'info' | 'warn' | 'error';
-}
+  private async createTransaction(input: CreatePaymentInput): Promise<Transaction> {
+    const transaction: Transaction = {
+      id: crypto.randomUUID(),
+      status: TransactionStatus.PENDING,
+      amount: input.amount.amount,
+      currency: input.amount.currency,
+      customerId: input.customer.id,
+      metadata: input.metadata,
+      createdAt: new Date(),
