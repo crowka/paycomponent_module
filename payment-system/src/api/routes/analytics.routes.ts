@@ -3,10 +3,7 @@ import { Router } from 'express';
 import { AnalyticsController } from '../controllers/analytics.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { validateRequest } from '../middleware/validation.middleware';
-import { 
-  metricsQuerySchema, 
-  reportQuerySchema 
-} from '../validators/schemas';
+import { metricsQuerySchema, reportQuerySchema } from '../validation/schemas';
 
 const router = Router();
 const controller = new AnalyticsController();
