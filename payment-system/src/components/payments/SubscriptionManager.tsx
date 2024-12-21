@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { usePayment } from '@/lib/hooks/usePayment';
+import { usePayment } from '@/hooks/usePayment';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { Alert } from '../ui/alert';
