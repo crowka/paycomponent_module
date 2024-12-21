@@ -3,6 +3,22 @@ import { AnalyticsDashboard } from './components/analytics/AnalyticsDashboard';
 import { ComplianceDashboard } from './components/compliance/ComplianceDashboard';
 import { PaymentDashboard } from './components/payments/PaymentDashboard';
 
+import { initializePaymentSystem } from './lib/payment/container';
+import { createClient } from '@supabase/supabase-js';
+
+// Initialize Supabase client
+const supabaseClient = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_KEY!
+);
+
+// Initialize payment system
+const paymentService = initializePaymentSystem(supabaseClient);
+
+// Now you can use paymentService throughout your application
+export { paymentService };
+
+
 export interface DashboardRoute {
   path: string;
   component: React.ComponentType;
