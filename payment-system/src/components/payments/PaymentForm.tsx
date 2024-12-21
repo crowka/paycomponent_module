@@ -8,7 +8,7 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { Alert } from '../ui/alert';
-import { useToast } from '@/lib/hooks/useToast';
+import { useToast } from '@/hooks/useToast';
 
 const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLIC_KEY);
 
