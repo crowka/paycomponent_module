@@ -1,5 +1,22 @@
 // src/lib/payment/customer/customer.store.ts
-export class CustomerStore {
+import { CustomerProfile, CustomerStatus, RiskLevel } from './types';
+
+export interface CustomerQuery {
+  status?: CustomerStatus;
+  riskLevel?: RiskLevel;
+  limit?: number;
+  offset?: number;
+}
+
+export abstract class CustomerStore {
+  abstract save(profile: CustomerProfile): Promise<void>;
+  abstract get(id: string): Promise<CustomerProfile | null>;
+  abstract findByEmail(email: string): Promise<CustomerProfile | null>;
+  abstract delete(id: string): Promise<void>;
+  abstract list(options?: CustomerQuery): Promise<CustomerProfile[]>;
+}
+
+export class InMemoryCustomerStore extends CustomerStore {
   private customers: Map<string, CustomerProfile> = new Map();
 
   async save(profile: CustomerProfile): Promise<void> {
@@ -21,12 +38,7 @@ export class CustomerStore {
     this.customers.delete(id);
   }
 
-  async list(options: {
-    status?: CustomerStatus;
-    riskLevel?: RiskLevel;
-    limit?: number;
-    offset?: number;
-  } = {}): Promise<CustomerProfile[]> {
+  async list(options: CustomerQuery = {}): Promise<CustomerProfile[]> {
     let profiles = Array.from(this.customers.values());
 
     if (options.status) {
