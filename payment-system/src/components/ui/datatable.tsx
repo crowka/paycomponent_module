@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { Button } from './button';
+import { Input } from './input';
+import { Card } from './card';
 import { ChevronUp, ChevronDown, Search } from 'lucide-react';
 
 interface Column {
@@ -16,11 +17,11 @@ interface DataTableProps {
   searchable?: boolean;
 }
 
-export const DataTable: React.FC<DataTableProps> = ({
+export function DataTable({
   data,
   columns,
   searchable = false,
-}) => {
+}: DataTableProps) {
   const [sortConfig, setSortConfig] = useState<{
     key: string;
     direction: 'asc' | 'desc';
@@ -61,76 +62,88 @@ export const DataTable: React.FC<DataTableProps> = ({
   }, [sortedData, searchTerm]);
 
   return (
-    <div className="space-y-4">
-      {searchable && (
-        <div className="relative">
-          <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-500" />
-          <Input
-            placeholder="Search..."
-            value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
-            className="pl-10"
-          />
-        </div>
-      )}
-      
-      <div className="relative overflow-x-auto rounded-lg border">
-        <table className="w-full text-left text-sm">
-          <thead className="bg-gray-50 text-xs uppercase text-gray-700">
-            <tr>
-              {columns.map(column => (
-                <th
-                  key={column.key}
-                  className="px-6 py-3"
-                >
-                  {column.sortable ? (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-auto p-0 font-semibold hover:bg-transparent"
-                      onClick={() => handleSort(column.key)}
-                    >
-                      {column.header}
-                      <span className="ml-2">
-                        {sortConfig?.key === column.key ? (
-                          sortConfig.direction === 'asc' ? (
-                            <ChevronUp className="h-4 w-4" />
-                          ) : (
-                            <ChevronDown className="h-4 w-4" />
-                          )
-                        ) : (
-                          <div className="h-4 w-4" />
-                        )}
-                      </span>
-                    </Button>
-                  ) : (
-                    column.header
-                  )}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {filteredData.map((row, rowIndex) => (
-              <tr 
-                key={rowIndex}
-                className="bg-white hover:bg-gray-50"
-              >
+    <Card>
+      <div className="space-y-4 p-6">
+        {searchable && (
+          <div className="relative">
+            <Search className="absolute left-3 top-3 h-4 w-4 text-gray-500" />
+            <Input
+              placeholder="Search..."
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              className="pl-10"
+            />
+          </div>
+        )}
+        
+        <div className="relative overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-gray-50 text-xs uppercase text-gray-700">
+              <tr>
                 {columns.map(column => (
-                  <td
+                  <th
                     key={column.key}
-                    className="px-6 py-4"
+                    className="px-6 py-3"
                   >
-                    {column.render
-                      ? column.render(row[column.key])
-                      : row[column.key]}
-                  </td>
+                    {column.sortable ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-auto p-0 font-semibold hover:bg-transparent"
+                        onClick={() => handleSort(column.key)}
+                      >
+                        {column.header}
+                        <span className="ml-2">
+                          {sortConfig?.key === column.key ? (
+                            sortConfig.direction === 'asc' ? (
+                              <ChevronUp className="h-4 w-4" />
+                            ) : (
+                              <ChevronDown className="h-4 w-4" />
+                            )
+                          ) : (
+                            <div className="h-4 w-4" />
+                          )}
+                        </span>
+                      </Button>
+                    ) : (
+                      column.header
+                    )}
+                  </th>
                 ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y">
+              {filteredData.map((row, rowIndex) => (
+                <tr 
+                  key={rowIndex}
+                  className="bg-white hover:bg-gray-50"
+                >
+                  {columns.map(column => (
+                    <td
+                      key={column.key}
+                      className="px-6 py-4"
+                    >
+                      {column.render
+                        ? column.render(row[column.key])
+                        : row[column.key]}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+              {filteredData.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={columns.length}
+                    className="px-6 py-4 text-center text-gray-500"
+                  >
+                    No data available
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
-    </div>
+    </Card>
   );
-};
+}
