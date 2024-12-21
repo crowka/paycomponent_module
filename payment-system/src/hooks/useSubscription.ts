@@ -1,6 +1,6 @@
 // src/hooks/useSubscription.ts
 import { useState, useCallback } from 'react';
-import { Subscription } from '../lib/payment/types';
+import { Subscription } from '../lib/payment/types/subscription';
 
 interface UseSubscriptionReturn {
   isLoading: boolean;
