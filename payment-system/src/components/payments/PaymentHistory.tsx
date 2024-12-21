@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { usePayment } from '@/lib/hooks/usePayment';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { Alert } from '../ui/alert';
-import { DataTable } from '../common/DataTable';
+import { DataTable } from '@/components/ui/data-table';
 import { Badge } from '../ui/badge';
 
 export function PaymentHistory() {
