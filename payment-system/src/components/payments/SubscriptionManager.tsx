@@ -4,6 +4,7 @@ import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { Alert } from '../ui/alert';
 import { Calendar, CheckCircle, XCircle } from 'lucide-react';
+import { Subscription } from '@/lib/payment/types/subscription';
 
 export function SubscriptionManager() {
   const { activeSubscription, isLoading, error, fetchSubscription, cancelSubscription } = usePayment();
