@@ -1,12 +1,19 @@
+// src/components/payments/PaymentMethodList.tsx
 import { useEffect } from 'react';
-import { usePayment } from '@/lib/hooks/usePayment';
+import { usePayment } from '../../hooks/usePayment';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { Alert } from '../ui/alert';
 import { CreditCard, Trash2 } from 'lucide-react';
 
 export function PaymentMethodList() {
-  const { paymentMethods, isLoading, error, fetchPaymentMethods, removePaymentMethod } = usePayment();
+  const { 
+    paymentMethods, 
+    isLoading, 
+    error, 
+    fetchPaymentMethods, 
+    removePaymentMethod 
+  } = usePayment();
 
   useEffect(() => {
     fetchPaymentMethods();
@@ -39,10 +46,12 @@ export function PaymentMethodList() {
                   <CreditCard className="h-6 w-6" />
                   <div>
                     <p className="font-medium">
-                      {method.brand} •••• {method.last4}
+                      {method.details.brand || 'Card'} •••• {method.details.last4 || '****'}
                     </p>
                     <p className="text-sm text-muted-foreground">
-                      Expires {method.expiryMonth}/{method.expiryYear}
+                      {method.details.expiryMonth && method.details.expiryYear 
+                        ? `Expires ${method.details.expiryMonth}/${method.details.expiryYear}`
+                        : 'No expiry date'}
                     </p>
                   </div>
                 </div>
