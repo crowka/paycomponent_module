@@ -1,8 +1,9 @@
 // src/api/routes/payment.routes.ts
 import { Router } from 'express';
 import { PaymentController } from '../controllers/payment.controller';
-import { validateRequest } from '../middleware/validation';
-import { authMiddleware } from '../middleware/auth';
+import { validateRequest } from '../middleware/validation.middleware';
+import { authMiddleware } from '../middleware/auth.middleware';
+import { idempotencyMiddleware } from '../middleware/idempotency.middleware';
 import { rateLimiter } from '../middleware/rate-limiter';
 
 const router = Router();
@@ -13,14 +14,15 @@ router.post(
   '/process',
   authMiddleware,
   rateLimiter,
-  validateRequest,
+  idempotencyMiddleware,
+  validateRequest('createPaymentMethod'),
   controller.processPayment
 );
 
 router.post(
   '/confirm/:paymentId',
   authMiddleware,
-  rateLimiter,
+  idempotencyMiddleware,
   controller.confirmPayment
 );
 
@@ -34,7 +36,7 @@ router.get(
 router.post(
   '/methods',
   authMiddleware,
-  validateRequest,
+  validateRequest('createPaymentMethod'),
   controller.addPaymentMethod
 );
 
