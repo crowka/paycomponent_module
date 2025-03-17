@@ -136,6 +136,82 @@ export function PaymentForm() {
               />
             </div>
             {formErrors.amount && (
-              <p className="text-sm text-re
+              <p className="text-sm text-red-500">{formErrors.amount}</p>
+            )}
+          </div>
+          
+          <div className="space-y-2">
+            <Label htmlFor="cardholderName">Cardholder Name</Label>
+            <Input
+              id="cardholderName"
+              name="cardholderName"
+              value={formData.cardholderName}
+              onChange={handleChange}
+              placeholder="John Doe"
+              error={!!formErrors.cardholderName}
+            />
+            {formErrors.cardholderName && (
+              <p className="text-sm text-red-500">{formErrors.cardholderName}</p>
+            )}
+          </div>
+          
+          <div className="space-y-2">
+            <Label htmlFor="cardNumber">Card Number</Label>
+            <Input
+              id="cardNumber"
+              name="cardNumber"
+              value={formData.cardNumber}
+              onChange={handleChange}
+              placeholder="1234 5678 9012 3456"
+              error={!!formErrors.cardNumber}
+            />
+            {formErrors.cardNumber && (
+              <p className="text-sm text-red-500">{formErrors.cardNumber}</p>
+            )}
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="expiryDate">Expiry Date</Label>
+              <Input
+                id="expiryDate"
+                name="expiryDate"
+                value={formData.expiryDate}
+                onChange={handleChange}
+                placeholder="MM/YY"
+                error={!!formErrors.expiryDate}
+              />
+              {formErrors.expiryDate && (
+                <p className="text-sm text-red-500">{formErrors.expiryDate}</p>
+              )}
+            </div>
+            
+            <div className="space-y-2">
+              <Label htmlFor="cvv">CVV</Label>
+              <Input
+                id="cvv"
+                name="cvv"
+                type="password"
+                value={formData.cvv}
+                onChange={handleChange}
+                placeholder="123"
+                error={!!formErrors.cvv}
+              />
+              {formErrors.cvv && (
+                <p className="text-sm text-red-500">{formErrors.cvv}</p>
+              )}
+            </div>
+          </div>
+          
+          <Button
+            type="submit"
+            className="w-full"
+            disabled={isLoading}
+          >
+            {isLoading ? 'Processing...' : 'Pay Now'}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
   );
 }
