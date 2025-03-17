@@ -1,3 +1,4 @@
+// src/lib/payment/providers/stripe-provider.ts
 import { Stripe } from 'stripe';
 import { BasePaymentProvider } from './base-provider';
 import { 
@@ -13,6 +14,11 @@ export class StripeProvider extends BasePaymentProvider {
 
   async initialize(config: ProviderConfig): Promise<void> {
     await super.initialize(config);
+    
+    if (!config.apiKey) {
+      throw new Error('Stripe API key is required');
+    }
+    
     this.client = new Stripe(config.apiKey, {
       apiVersion: '2023-10-16'
     });
@@ -22,15 +28,40 @@ export class StripeProvider extends BasePaymentProvider {
     this.checkInitialization();
     
     try {
+      // Convert amount to cents for Stripe
+      const amount = Math.round(data.amount.amount * 100);
+      
+      // Prepare payment method
+      let paymentMethodId: string;
+      
+      if (typeof data.paymentMethod === 'string') {
+        paymentMethodId = data.paymentMethod;
+      } else {
+        // Create a payment method if object is provided
+        const paymentMethodResult = await this.client.paymentMethods.create({
+          type: 'card',
+          card: {
+            number: data.paymentMethod.details.number,
+            exp_month: data.paymentMethod.details.exp_month,
+            exp_year: data.paymentMethod.details.exp_year,
+            cvc: data.paymentMethod.details.cvc
+          }
+        });
+        
+        paymentMethodId = paymentMethodResult.id;
+      }
+
+      // Create a payment intent
       const paymentIntent = await this.client.paymentIntents.create({
-        amount: Math.round(data.amount.amount * 100), // Convert to cents
+        amount,
         currency: data.amount.currency.toLowerCase(),
-        customer: data.customer.id,
-        payment_method: typeof data.paymentMethod === 'string' 
-          ? data.paymentMethod 
-          : data.paymentMethod.id,
-        metadata: data.metadata,
-        confirm: true
+        payment_method: paymentMethodId,
+        confirm: true,
+        metadata: {
+          ...data.metadata,
+          customerId: data.customer.id
+        },
+        receipt_email: data.customer.email
       });
 
       return {
@@ -38,6 +69,131 @@ export class StripeProvider extends BasePaymentProvider {
         transactionId: paymentIntent.id,
         metadata: paymentIntent.metadata as Record<string, any>
       };
+    } catch (error) {
+      return {
+        success: false,
+        error: {
+          code: error.code || 'payment_failed',
+          message: error.message,
+          details: error.raw || error
+        }
+      };
+    }
+  }
+
+  async confirmPayment(paymentId: string): Promise<PaymentResult> {
+    this.checkInitialization();
+
+    try {
+      const paymentIntent = await this.client.paymentIntents.confirm(paymentId);
+      
+      return {
+        success: paymentIntent.status === 'succeeded',
+        transactionId: paymentIntent.id,
+        metadata: paymentIntent.metadata as Record<string, any>
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: {
+          code: error.code || 'confirmation_failed',
+          message: error.message,
+          details: error.raw || error
+        }
+      };
+    }
+  }
+
+  async getPaymentMethods(customerId: string): Promise<PaymentMethod[]> {
+    this.checkInitialization();
+
+    try {
+      const methods = await this.client.paymentMethods.list({
+        customer: customerId,
+        type: 'card'
+      });
+
+      return methods.data.map(method => ({
+        id: method.id,
+        type: 'card',
+        isDefault: method.metadata?.default === 'true',
+        customerId,
+        details: {
+          brand: method.card.brand,
+          last4: method.card.last4,
+          expiryMonth: method.card.exp_month,
+          expiryYear: method.card.exp_year
+        }
+      }));
+    } catch (error) {
+      console.error('Error fetching payment methods:', error);
+      return [];
+    }
+  }
+
+  async addPaymentMethod(
+    customerId: string, 
+    data: AddPaymentMethodInput
+  ): Promise<PaymentMethod> {
+    this.checkInitialization();
+
+    try {
+      // Create payment method
+      const paymentMethod = await this.client.paymentMethods.create({
+        type: 'card',
+        card: {
+          number: data.details.number,
+          exp_month: data.details.exp_month,
+          exp_year: data.details.exp_year,
+          cvc: data.details.cvc
+        },
+        metadata: { 
+          default: data.setAsDefault ? 'true' : 'false' 
+        }
+      });
+
+      // Attach to customer
+      await this.client.paymentMethods.attach(paymentMethod.id, {
+        customer: customerId
+      });
+
+      // Set as default if requested
+      if (data.setAsDefault) {
+        await this.client.customers.update(customerId, {
+          invoice_settings: {
+            default_payment_method: paymentMethod.id
+          }
+        });
+      }
+
+      return {
+        id: paymentMethod.id,
+        type: 'card',
+        isDefault: data.setAsDefault || false,
+        customerId,
+        details: {
+          brand: paymentMethod.card?.brand,
+          last4: paymentMethod.card?.last4,
+          expiryMonth: paymentMethod.card?.exp_month,
+          expiryYear: paymentMethod.card?.exp_year
+        }
+      };
+    } catch (error) {
+      console.error('Error adding payment method:', error);
+      throw new Error(error.message);
+    }
+  }
+
+  async removePaymentMethod(methodId: string): Promise<void> {
+    this.checkInitialization();
+    try {
+      await this.client.paymentMethods.detach(methodId);
+    } catch (error) {
+      console.error('Error removing payment method:', error);
+      throw new Error(error.message);
+    }
+  }
+}
     } catch (error) {
       return {
         success: false,
