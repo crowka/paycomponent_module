@@ -1,17 +1,24 @@
 // src/api/middleware/validation.middleware.ts
 import { Request, Response, NextFunction } from 'express';
-import { AnyZodObject } from 'zod';
+import { AnyZodObject, z } from 'zod';
 import {
   paymentMethodSchema,
   currencyConversionSchema,
   customerProfileSchema,
   spendingLimitsSchema,
-  transactionSchema // You'll need to create this
 } from '../validation/schemas';
-import { TransactionManager } from '../../lib/payment/transaction/transaction.manager';
+import { TransactionManager } from '../../lib/payment/transaction/managers/transaction.manager';
 import { TransactionStatus, TransactionType } from '../../lib/payment/transaction/types';
 
-// Schema definitions
+// Add missing transaction schema
+const transactionSchema = z.object({
+  type: z.enum(['PAYMENT', 'REFUND', 'CHARGEBACK']),
+  amount: z.number().positive(),
+  currency: z.string().length(3),
+  paymentMethodId: z.string(),
+  metadata: z.record(z.any()).optional()
+});
+
 const schemas = {
   createPaymentMethod: paymentMethodSchema,
   updatePaymentMethod: paymentMethodSchema.partial(),
@@ -147,5 +154,18 @@ export const createValidationMiddleware = (transactionManager: TransactionManage
     validateTransaction: middleware.validateTransaction,
     validateTransactionStatus: middleware.validateTransactionStatus,
     validateTransactionLimits: middleware.validateTransactionLimits,
+  };
+};
+
+// For backward compatibility, export a simple version that doesn't require TransactionManager
+export const validateRequest = (schemaName: keyof typeof schemas) => {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const schema = schemas[schemaName];
+      await schema.parseAsync(req.body);
+      next();
+    } catch (error) {
+      res.status(400).json({ error: 'Validation error', details: error.errors });
+    }
   };
 };
