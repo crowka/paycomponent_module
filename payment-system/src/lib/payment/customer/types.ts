@@ -29,7 +29,7 @@ export enum CustomerStatus {
 
 export interface CustomerPreferences {
   communicationChannel: 'email' | 'sms' | 'push';
-  defaultPaymentType?: PaymentMethodType;
+  defaultPaymentType?: string;
   savePaymentMethods: boolean;
   autoPayEnabled: boolean;
 }
