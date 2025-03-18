@@ -1,6 +1,6 @@
-// src/lib/payment/contexts/PaymentContext.tsx
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { 
+  PaymentProviderInterface,
   CreatePaymentInput, 
   PaymentResult, 
   PaymentMethod,
