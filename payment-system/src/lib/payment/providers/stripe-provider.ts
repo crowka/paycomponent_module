@@ -9,6 +9,7 @@ import {
   ProviderConfig
 } from '../types/provider.types';
 import { PaymentLogger } from '../utils/logger';
+import { errorHandler, ErrorCode } from '../utils/error';
 
 export class StripeProvider extends BasePaymentProvider {
   private client: Stripe;
@@ -23,7 +24,11 @@ export class StripeProvider extends BasePaymentProvider {
     await super.initialize(config);
     
     if (!config.apiKey) {
-      throw new Error('Stripe API key is required');
+      throw errorHandler.createError(
+        'Stripe API key is required',
+        ErrorCode.CONFIGURATION_ERROR,
+        { provider: 'StripeProvider' }
+      );
     }
     
     this.client = new Stripe(config.apiKey, {
@@ -138,7 +143,12 @@ export class StripeProvider extends BasePaymentProvider {
       }));
     } catch (error) {
       this.logger.error('Error fetching payment methods', { error });
-      return [];
+      throw errorHandler.wrapError(
+        error,
+        'Failed to fetch payment methods',
+        ErrorCode.PROVIDER_COMMUNICATION_ERROR,
+        { customerId }
+      );
     }
   }
 
@@ -191,7 +201,12 @@ export class StripeProvider extends BasePaymentProvider {
       };
     } catch (error) {
       this.logger.error('Error adding payment method', { error });
-      throw new Error(error.message || 'Failed to add payment method');
+      throw errorHandler.wrapError(
+        error,
+        'Failed to add payment method',
+        ErrorCode.PROVIDER_COMMUNICATION_ERROR,
+        { customerId }
+      );
     }
   }
 
@@ -203,7 +218,34 @@ export class StripeProvider extends BasePaymentProvider {
       this.logger.info('Payment method removed', { methodId });
     } catch (error) {
       this.logger.error('Error removing payment method', { error });
-      throw new Error(error.message || 'Failed to remove payment method');
+      throw errorHandler.wrapError(
+        error,
+        'Failed to remove payment method',
+        ErrorCode.PROVIDER_COMMUNICATION_ERROR,
+        { methodId }
+      );
+    }
+  }
+
+  async verifyWebhookSignature(payload: string, signature: string): Promise<boolean> {
+    this.checkInitialization();
+    
+    try {
+      if (!this.config.webhookSecret) {
+        this.logger.warn('Webhook secret not configured for Stripe');
+        return false;
+      }
+      
+      const event = this.client.webhooks.constructEvent(
+        payload,
+        signature,
+        this.config.webhookSecret
+      );
+      
+      return !!event;
+    } catch (error) {
+      this.logger.error('Webhook signature verification failed', { error });
+      return false;
     }
   }
 }
