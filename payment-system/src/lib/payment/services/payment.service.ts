@@ -23,41 +23,67 @@ export class PaymentService {
     this.eventEmitter = options.eventEmitter;
   }
 
-  async processPayment(input: CreatePaymentInput): Promise<PaymentResult> {
+async processPayment(input: CreatePaymentInput): Promise<PaymentResult> {
+  try {
+    // Validate input
     try {
-      // Validate input
       validatePaymentInput(input);
+    } catch (error) {
+      throw errorHandler.wrapError(
+        error,
+        'Payment validation failed',
+        ErrorCode.PAYMENT_VALIDATION_FAILED,
+        { input: { ...input, paymentMethod: '***redacted***' } }
+      );
+    }
 
-      // Encrypt sensitive data
-      const encryptedData = await this.encryptSensitiveData(input);
+    // Encrypt sensitive data
+    const encryptedData = await this.encryptSensitiveData(input);
 
-      // Process payment
-      this.logger.info('Processing payment', { amount: input.amount });
-      const result = await this.provider.createPayment(encryptedData);
+    // Process payment
+    this.logger.info('Processing payment', { amount: input.amount });
+    const result = await this.provider.createPayment(encryptedData);
 
-      // Log result
-      if (result.success) {
-        this.logger.info('Payment successful', { transactionId: result.transactionId });
-        
-        if (this.eventEmitter) {
-          await this.eventEmitter.emit('payment.succeeded', {
-            transactionId: result.transactionId,
-            amount: input.amount,
-            customerId: input.customer.id
-          });
-        }
-      } else {
-        this.logger.error('Payment failed', { error: result.error });
-        
-        if (this.eventEmitter && result.error) {
-          await this.eventEmitter.emit('payment.failed', {
-            error: result.error,
-            amount: input.amount,
-            customerId: input.customer.id
-          });
-        }
+    // Log result
+    if (result.success) {
+      this.logger.info('Payment successful', { transactionId: result.transactionId });
+      
+      if (this.eventEmitter) {
+        await this.eventEmitter.emit('payment.succeeded', {
+          transactionId: result.transactionId,
+          amount: input.amount,
+          customerId: input.customer.id
+        });
       }
+    } else {
+      this.logger.error('Payment failed', { error: result.error });
+      
+      if (this.eventEmitter && result.error) {
+        await this.eventEmitter.emit('payment.failed', {
+          error: result.error,
+          amount: input.amount,
+          customerId: input.customer.id
+        });
+      }
+    }
 
+    return result;
+  } catch (error) {
+    // If it's already a PaymentError, just propagate it
+    if (error instanceof PaymentError) {
+      throw error;
+    }
+    
+    // Wrap other errors
+    throw errorHandler.wrapError(
+      error,
+      'Payment processing error',
+      ErrorCode.PAYMENT_FAILED,
+      { customerId: input.customer.id }
+    );
+  }
+}
+ 
       return result;
     } catch (error) {
       this.logger.error('Payment processing error', { error });
