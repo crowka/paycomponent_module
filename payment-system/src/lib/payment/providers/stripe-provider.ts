@@ -13,7 +13,6 @@ import { errorHandler, ErrorCode } from '../utils/error';
 
 export class StripeProvider extends BasePaymentProvider {
   private client: Stripe;
-  private logger: PaymentLogger;
 
   constructor() {
     super();
@@ -61,6 +60,9 @@ export class StripeProvider extends BasePaymentProvider {
 
   async createPayment(data: CreatePaymentInput): Promise<PaymentResult> {
     this.checkInitialization();
+    
+    // Validate input parameters
+    this.validateCreatePaymentInput(data);
     
     const paymentId = Math.random().toString(36).substring(7);
     this.logger.info(`Creating payment [${paymentId}]`, { 
@@ -153,6 +155,14 @@ export class StripeProvider extends BasePaymentProvider {
   async confirmPayment(paymentId: string): Promise<PaymentResult> {
     this.checkInitialization();
     
+    // Validate payment ID
+    if (!paymentId) {
+      throw errorHandler.createError(
+        'Payment ID is required',
+        ErrorCode.VALIDATION_ERROR
+      );
+    }
+    
     const operationId = Math.random().toString(36).substring(7);
     this.logger.info(`Confirming payment [${operationId}]`, { paymentId });
 
@@ -198,6 +208,14 @@ export class StripeProvider extends BasePaymentProvider {
 
   async getPaymentMethods(customerId: string): Promise<PaymentMethod[]> {
     this.checkInitialization();
+    
+    // Validate customer ID
+    if (!customerId) {
+      throw errorHandler.createError(
+        'Customer ID is required',
+        ErrorCode.VALIDATION_ERROR
+      );
+    }
     
     const operationId = Math.random().toString(36).substring(7);
     this.logger.info(`Fetching payment methods [${operationId}]`, { customerId });
@@ -247,6 +265,17 @@ export class StripeProvider extends BasePaymentProvider {
     data: AddPaymentMethodInput
   ): Promise<PaymentMethod> {
     this.checkInitialization();
+    
+    // Validate customer ID
+    if (!customerId) {
+      throw errorHandler.createError(
+        'Customer ID is required',
+        ErrorCode.VALIDATION_ERROR
+      );
+    }
+    
+    // Validate payment method data
+    this.validateAddPaymentMethodInput(data);
     
     const operationId = Math.random().toString(36).substring(7);
     this.logger.info(`Adding payment method [${operationId}]`, { 
@@ -333,6 +362,14 @@ export class StripeProvider extends BasePaymentProvider {
   async removePaymentMethod(methodId: string): Promise<void> {
     this.checkInitialization();
     
+    // Validate method ID
+    if (!methodId) {
+      throw errorHandler.createError(
+        'Payment method ID is required',
+        ErrorCode.VALIDATION_ERROR
+      );
+    }
+    
     const operationId = Math.random().toString(36).substring(7);
     this.logger.info(`Removing payment method [${operationId}]`, { methodId });
     
@@ -358,6 +395,21 @@ export class StripeProvider extends BasePaymentProvider {
 
   async verifyWebhookSignature(payload: string, signature: string): Promise<boolean> {
     this.checkInitialization();
+    
+    // Validate webhook parameters
+    if (!payload) {
+      throw errorHandler.createError(
+        'Webhook payload is required',
+        ErrorCode.VALIDATION_ERROR
+      );
+    }
+    
+    if (!signature) {
+      throw errorHandler.createError(
+        'Webhook signature is required',
+        ErrorCode.VALIDATION_ERROR
+      );
+    }
     
     const operationId = Math.random().toString(36).substring(7);
     this.logger.info(`Verifying webhook signature [${operationId}]`, {
