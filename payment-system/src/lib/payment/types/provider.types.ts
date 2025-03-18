@@ -1,3 +1,4 @@
+// src/lib/payment/types/provider.types.ts
 import { PaymentAmount, Customer, PaymentMethod, PaymentResult } from './common.types';
 
 export interface ProviderConfig {
@@ -14,6 +15,7 @@ export interface PaymentProviderInterface {
   getPaymentMethods(customerId: string): Promise<PaymentMethod[]>;
   addPaymentMethod(customerId: string, data: AddPaymentMethodInput): Promise<PaymentMethod>;
   removePaymentMethod(methodId: string): Promise<void>;
+  verifyWebhookSignature?(payload: string, signature: string): Promise<boolean>;
 }
 
 export interface CreatePaymentInput {
