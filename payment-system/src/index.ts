@@ -7,6 +7,7 @@ import customerRoutes from './api/routes/customer.routes';
 import complianceRoutes from './api/routes/compliance.routes';
 import analyticsRoutes from './api/routes/analytics.routes';
 import { rateLimiter } from './api/middleware/rate-limiter';
+import { errorMiddleware } from './api/middleware/error.middleware';
 
 // Load environment variables
 dotenv.config();
@@ -27,13 +28,8 @@ app.use('/api/compliance', complianceRoutes);
 app.use('/api/analytics', analyticsRoutes);
 
 // Error handling
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({
-    error: 'Internal Server Error',
-    message: process.env.NODE_ENV === 'development' ? err.message : undefined
-  });
-});
+import { errorMiddleware } from './api/middleware/error.middleware';
+app.use(errorMiddleware);
 
 // Start server
 app.listen(PORT, () => {
