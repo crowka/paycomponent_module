@@ -1,4 +1,4 @@
-// src/lib/payment/services/payment.service.ts
+// src/lib/payment/services/payment.service.ts (partial update to the constructor)
 import { 
   PaymentProviderInterface,
   CreatePaymentInput,
@@ -10,6 +10,12 @@ import { validatePaymentInput } from '../utils/validation';
 import { encrypt, decrypt } from '../utils/encryption';
 import { PaymentLogger } from '../utils/logger';
 import { EventEmitter } from '../events/event.emitter';
+import { errorHandler, ErrorCode } from '../utils/error';
+
+export interface PaymentServiceOptions {
+  logLevel?: 'debug' | 'info' | 'warn' | 'error';
+  eventEmitter?: EventEmitter;
+}
 
 export class PaymentService {
   private logger: PaymentLogger;
@@ -19,10 +25,25 @@ export class PaymentService {
     private provider: PaymentProviderInterface,
     private options: PaymentServiceOptions = {}
   ) {
+    // Validate that provider implements the required interface
+    if (!provider || typeof provider.createPayment !== 'function') {
+      throw errorHandler.createError(
+        'Invalid payment provider',
+        ErrorCode.CONFIGURATION_ERROR,
+        { provider: provider?.constructor?.name || 'unknown' }
+      );
+    }
+    
     this.logger = new PaymentLogger(options.logLevel || 'info');
     this.eventEmitter = options.eventEmitter;
+    
+    this.logger.info('Payment service initialized', { 
+      provider: provider.constructor.name 
+    });
   }
 
+  // Rest of the class remains the same...
+}
 async processPayment(input: CreatePaymentInput): Promise<PaymentResult> {
   try {
     // Validate input
