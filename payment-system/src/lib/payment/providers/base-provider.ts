@@ -7,7 +7,7 @@ import {
   PaymentMethod,
   AddPaymentMethodInput
 } from '../types/provider.types';
-import { errorHandler, ErrorCode, PaymentError } from '../utils/error';
+import { errorHandler, ErrorCode } from '../utils/error';
 
 export abstract class BasePaymentProvider implements PaymentProviderInterface {
   protected config: ProviderConfig;
@@ -26,6 +26,14 @@ export abstract class BasePaymentProvider implements PaymentProviderInterface {
         { provider: this.constructor.name }
       );
     }
+  }
+
+  // Added implementation for verifyWebhookSignature with default behavior
+  async verifyWebhookSignature(payload: string, signature: string): Promise<boolean> {
+    this.checkInitialization();
+    // Default implementation returns false - concrete providers should override this
+    console.warn('verifyWebhookSignature not implemented by provider');
+    return false;
   }
 
   abstract createPayment(data: CreatePaymentInput): Promise<PaymentResult>;
