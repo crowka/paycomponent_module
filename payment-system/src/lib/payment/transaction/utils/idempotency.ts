@@ -5,6 +5,13 @@ import { PaymentLogger } from '../../utils/logger';
 import { errorHandler, ErrorCode } from '../../utils/error';
 import { EventEmitter } from '../../events/event.emitter';
 
+export interface RequestContext {
+  path: string;
+  method: string;
+  bodyHash: string;
+  timestamp: Date;
+}
+
 export interface IdempotencyRecord {
   key: string;
   locked: boolean;
@@ -13,6 +20,8 @@ export interface IdempotencyRecord {
   resourceType?: string;
   expiresAt: Date;
   requestHash?: string;
+  requestContext?: RequestContext;
+  cachedResponse?: string;
   attempts: number;
   lastAttemptAt?: Date;
 }
@@ -23,16 +32,19 @@ export class IdempotencyManager {
   private lockExpirationMs: number;
   private recordExpirationMs: number;
   private eventEmitter?: EventEmitter;
+  private staleRequestTimeoutMs: number;
 
   constructor(
     options: {
       lockExpirationMs?: number;
       recordExpirationMs?: number;
+      staleRequestTimeoutMs?: number;
       eventEmitter?: EventEmitter;
     } = {}
   ) {
     this.lockExpirationMs = options.lockExpirationMs || 300000; // 5 minutes default lock expiration
     this.recordExpirationMs = options.recordExpirationMs || 86400000; // 24 hours default record expiration
+    this.staleRequestTimeoutMs = options.staleRequestTimeoutMs || 3600000; // 1 hour default for stale requests
     this.eventEmitter = options.eventEmitter;
     this.logger = new PaymentLogger('info', 'IdempotencyManager');
 
@@ -46,15 +58,12 @@ export class IdempotencyManager {
    * Check if a key exists and either lock it or return information about the existing operation
    * Includes replay detection based on request body hashing
    */
-  async checkAndLock(key: string, requestBody?: any): Promise<boolean> {
+  async checkAndLock(key: string, requestContext?: RequestContext): Promise<boolean> {
     this.validateKey(key);
     
     // First run cleanup
     this.cleanup();
 
-    // Generate request hash if body is provided for replay detection
-    const requestHash = requestBody ? this.generateRequestHash(requestBody) : undefined;
-    
     // Check if key exists and is still valid
     const existing = this.records.get(key);
 
@@ -70,11 +79,14 @@ export class IdempotencyManager {
       existing.attempts += 1;
       existing.lastAttemptAt = new Date();
       
-      // Check for replay attack with different request body
-      if (requestHash && existing.requestHash && requestHash !== existing.requestHash) {
+      // Check for replay attack with different request context
+      if (requestContext && existing.requestHash && 
+          requestContext.bodyHash !== existing.requestHash) {
         this.logger.warn('Possible replay attack detected: same idempotency key with different request body', {
           key,
-          attempts: existing.attempts
+          attempts: existing.attempts,
+          originalPath: existing.requestContext?.path,
+          newPath: requestContext.path
         });
         
         // Emit replay detection event
@@ -83,7 +95,9 @@ export class IdempotencyManager {
             key,
             attempts: existing.attempts,
             originalTimestamp: existing.timestamp,
-            newTimestamp: new Date()
+            newTimestamp: new Date(),
+            originalPath: existing.requestContext?.path,
+            newPath: requestContext.path
           }).catch(error => {
             this.logger.error('Failed to emit replay detection event', { error });
           });
@@ -98,19 +112,37 @@ export class IdempotencyManager {
       
       if (existing.locked) {
         const now = new Date();
-        // If lock has expired, we can reset it
+        // Check if this is a stale lock (hanging process)
         if (now > existing.expiresAt) {
-          this.logger.info('Lock expired, resetting', { key });
+          this.logger.warn('Detected stale lock, resetting', { 
+            key,
+            lockedAt: existing.timestamp,
+            expiredAt: existing.expiresAt
+          });
+          
           existing.locked = true;
           existing.timestamp = now;
           existing.expiresAt = new Date(now.getTime() + this.lockExpirationMs);
+          
+          // Emit stale lock event
+          if (this.eventEmitter) {
+            this.eventEmitter.emit('idempotency.stale_lock_reset', {
+              key,
+              originalLockTime: existing.timestamp,
+              newLockTime: now
+            }).catch(error => {
+              this.logger.error('Failed to emit stale lock event', { error });
+            });
+          }
+          
           return true;
         }
         
         // Otherwise, it's a duplicate request during processing
         this.logger.warn('Duplicate request while operation in progress', {
           key, 
-          lockedAt: existing.timestamp
+          lockedAt: existing.timestamp,
+          timeElapsed: Date.now() - existing.timestamp.getTime()
         });
         
         // Emit duplicate request event
@@ -118,7 +150,8 @@ export class IdempotencyManager {
           this.eventEmitter.emit('idempotency.duplicate_request', {
             key,
             status: 'in_progress',
-            attempts: existing.attempts
+            attempts: existing.attempts,
+            resourceId: existing.resourceId
           }).catch(error => {
             this.logger.error('Failed to emit duplicate request event', { error });
           });
@@ -127,7 +160,10 @@ export class IdempotencyManager {
         throw errorHandler.createError(
           'Duplicate request: operation is in progress',
           ErrorCode.DUPLICATE_REQUEST,
-          { idempotencyKey: key }
+          { 
+            idempotencyKey: key,
+            inProgressSince: existing.timestamp
+          }
         );
       }
       
@@ -135,7 +171,8 @@ export class IdempotencyManager {
       if (existing.resourceId) {
         this.logger.info('Request with previously completed operation', {
           key,
-          resourceId: existing.resourceId
+          resourceId: existing.resourceId,
+          resourceType: existing.resourceType
         });
         
         // Emit duplicate request event for completed operation
@@ -165,6 +202,13 @@ export class IdempotencyManager {
       existing.locked = true;
       existing.timestamp = new Date();
       existing.expiresAt = new Date(Date.now() + this.lockExpirationMs);
+      
+      // Update request context if provided
+      if (requestContext) {
+        existing.requestContext = requestContext;
+        existing.requestHash = requestContext.bodyHash;
+      }
+      
       return true;
     }
     
@@ -175,18 +219,24 @@ export class IdempotencyManager {
       locked: true, 
       timestamp: now,
       expiresAt: new Date(now.getTime() + this.lockExpirationMs),
-      requestHash,
+      requestHash: requestContext?.bodyHash,
+      requestContext,
       attempts: 1,
       lastAttemptAt: now
     });
     
-    this.logger.info('Created new idempotency record', { key, requestHash: requestHash ? '[present]' : '[not provided]' });
+    this.logger.info('Created new idempotency record', { 
+      key, 
+      requestHash: requestContext?.bodyHash ? '[present]' : '[not provided]',
+      path: requestContext?.path 
+    });
     
     // Emit new key event
     if (this.eventEmitter) {
       this.eventEmitter.emit('idempotency.key_created', {
         key,
-        timestamp: now
+        timestamp: now,
+        path: requestContext?.path
       }).catch(error => {
         this.logger.error('Failed to emit key created event', { error });
       });
@@ -226,7 +276,9 @@ export class IdempotencyManager {
   async associateResource(
     key: string, 
     resourceId: string, 
-    resourceType: string
+    resourceType: string,
+    cachedResponse?: string,
+    requestHash?: string
   ): Promise<void> {
     this.validateKey(key);
     
@@ -236,13 +288,24 @@ export class IdempotencyManager {
       record.resourceType = resourceType;
       record.locked = false;
       
+      // Store cache response if provided
+      if (cachedResponse) {
+        record.cachedResponse = cachedResponse;
+      }
+      
+      // Update request hash if provided and not already set
+      if (requestHash && !record.requestHash) {
+        record.requestHash = requestHash;
+      }
+      
       // Extend expiration time since we now have an associated resource
       record.expiresAt = new Date(Date.now() + this.recordExpirationMs);
       
       this.logger.info('Associated resource with idempotency key', { 
         key, 
         resourceId, 
-        resourceType 
+        resourceType,
+        hasCachedResponse: !!cachedResponse
       });
       
       // Emit resource association event
@@ -251,7 +314,8 @@ export class IdempotencyManager {
           key,
           resourceId,
           resourceType,
-          attempts: record.attempts
+          attempts: record.attempts,
+          hasCachedResponse: !!cachedResponse
         }).catch(error => {
           this.logger.error('Failed to emit resource association event', { error });
         });
@@ -303,6 +367,8 @@ export class IdempotencyManager {
     expired: boolean;
     hasResource: boolean;
     attempts: number;
+    requestHash?: string;
+    cachedResponse?: string;
     resourceId?: string;
     resourceType?: string;
   } | null> {
@@ -320,6 +386,8 @@ export class IdempotencyManager {
       expired: record.expiresAt < now,
       hasResource: !!record.resourceId,
       attempts: record.attempts,
+      requestHash: record.requestHash,
+      cachedResponse: record.cachedResponse,
       resourceId: record.resourceId,
       resourceType: record.resourceType
     };
@@ -331,21 +399,51 @@ export class IdempotencyManager {
   async cleanup(): Promise<void> {
     const now = new Date().getTime();
     let expiredCount = 0;
+    let staleCount = 0;
     
     for (const [key, record] of this.records.entries()) {
+      // Remove expired records
       if (record.expiresAt.getTime() < now) {
         this.records.delete(key);
         expiredCount++;
+        continue;
+      }
+      
+      // Detect and handle stale locked requests
+      if (record.locked && !record.resourceId) {
+        const lockDuration = now - record.timestamp.getTime();
+        
+        // If the lock has been held for too long, consider it stale
+        if (lockDuration > this.staleRequestTimeoutMs) {
+          this.logger.warn(`Detected stale request for key ${key}, releasing lock`, {
+            lockedFor: `${Math.round(lockDuration / 1000 / 60)} minutes`
+          });
+          
+          record.locked = false;
+          staleCount++;
+          
+          // Emit stale request event
+          if (this.eventEmitter) {
+            this.eventEmitter.emit('idempotency.stale_request_detected', {
+              key,
+              lockedSince: record.timestamp,
+              duration: lockDuration
+            }).catch(error => {
+              this.logger.error('Failed to emit stale request event', { error });
+            });
+          }
+        }
       }
     }
     
-    if (expiredCount > 0) {
-      this.logger.info(`Cleaned up ${expiredCount} expired idempotency records`);
+    if (expiredCount > 0 || staleCount > 0) {
+      this.logger.info(`Cleaned up ${expiredCount} expired idempotency records and detected ${staleCount} stale requests`);
       
       // Emit cleanup event
       if (this.eventEmitter) {
         this.eventEmitter.emit('idempotency.cleanup', {
           recordsRemoved: expiredCount,
+          staleRecordsDetected: staleCount,
           remainingRecords: this.records.size
         }).catch(error => {
           this.logger.error('Failed to emit cleanup event', { error });
@@ -387,46 +485,52 @@ export class IdempotencyManager {
   }
 
   /**
-   * Generate a hash from request body for replay detection
+   * Get metrics and statistics about idempotency system
    */
-  private generateRequestHash(data: any): string {
-    try {
-      // Sort keys for consistent hashing regardless of property order
-      const normalized = typeof data === 'string' 
-        ? data 
-        : JSON.stringify(this.sortObject(data));
-        
-      return createHash('sha256')
-        .update(normalized)
-        .digest('hex');
-    } catch (error) {
-      this.logger.warn('Failed to generate request hash', { error });
-      return '';
+  getMetrics(): {
+    totalRecords: number;
+    lockedRecords: number;
+    completedRecords: number;
+    averageAttempts: number;
+    oldestRecord: Date | null;
+  } {
+    let lockedCount = 0;
+    let completedCount = 0;
+    let totalAttempts = 0;
+    let oldestTimestamp: Date | null = null;
+    
+    for (const record of this.records.values()) {
+      if (record.locked) lockedCount++;
+      if (record.resourceId) completedCount++;
+      totalAttempts += record.attempts;
+      
+      if (!oldestTimestamp || record.timestamp < oldestTimestamp) {
+        oldestTimestamp = record.timestamp;
+      }
     }
+    
+    return {
+      totalRecords: this.records.size,
+      lockedRecords: lockedCount,
+      completedRecords: completedCount,
+      averageAttempts: this.records.size > 0 ? totalAttempts / this.records.size : 0,
+      oldestRecord: oldestTimestamp
+    };
   }
 
   /**
-   * Sort object keys recursively for consistent serialization
+   * Check if any idempotency key is in a locked state for a specific resource
+   * Used to prevent conflicts between different operations on the same resource
    */
-  private sortObject(obj: any): any {
-    if (obj === null || typeof obj !== 'object') {
-      return obj;
+  isResourceLocked(resourceType: string, resourceId: string): boolean {
+    for (const record of this.records.values()) {
+      if (record.locked && 
+          record.resourceType === resourceType && 
+          record.resourceId === resourceId) {
+        return true;
+      }
     }
-    
-    // Handle arrays
-    if (Array.isArray(obj)) {
-      return obj.map(item => this.sortObject(item));
-    }
-    
-    // Handle regular objects
-    const sorted: Record<string, any> = {};
-    const keys = Object.keys(obj).sort();
-    
-    for (const key of keys) {
-      sorted[key] = this.sortObject(obj[key]);
-    }
-    
-    return sorted;
+    return false;
   }
 
   /**
@@ -450,6 +554,13 @@ export class IdempotencyManager {
     if (key.length < 8) {
       throw errorHandler.createError(
         'Idempotency key must be at least 8 characters',
+        ErrorCode.VALIDATION_ERROR
+      );
+    }
+    
+    if (!/^[a-zA-Z0-9_-]+$/.test(key)) {
+      throw errorHandler.createError(
+        'Idempotency key must contain only alphanumeric characters, hyphens, and underscores',
         ErrorCode.VALIDATION_ERROR
       );
     }
