@@ -1,3 +1,4 @@
+// src/lib/payment/providers/base-provider.ts
 import { 
   PaymentProviderInterface,
   ProviderConfig,
@@ -6,6 +7,7 @@ import {
   PaymentMethod,
   AddPaymentMethodInput
 } from '../types/provider.types';
+import { errorHandler, ErrorCode, PaymentError } from '../utils/error';
 
 export abstract class BasePaymentProvider implements PaymentProviderInterface {
   protected config: ProviderConfig;
@@ -18,7 +20,11 @@ export abstract class BasePaymentProvider implements PaymentProviderInterface {
 
   protected checkInitialization(): void {
     if (!this.initialized) {
-      throw new Error('Payment provider not initialized');
+      throw errorHandler.createError(
+        'Payment provider not initialized',
+        ErrorCode.PROVIDER_NOT_INITIALIZED,
+        { provider: this.constructor.name }
+      );
     }
   }
 
