@@ -844,8 +844,89 @@ export class TransactionReconciliator {
       return;
     }
     
-    // Group mismatches by severity
+   // Group mismatches by severity
     const criticalMismatches = mismatches.filter(m => m.severity === 'critical');
     const highMismatches = mismatches.filter(m => m.severity === 'high');
+    
+    // Generate alert for critical mismatches
+    if (criticalMismatches.length > 0) {
+      this.alertDetector.addRule({
+        name: `reconciliation_critical_${reconciliationId}`,
+        condition: () => true, // Immediate alert
+        severity: 'critical',
+        description: `Found ${criticalMismatches.length} critical mismatches during reconciliation. Requires immediate attention.`
+      });
+
+      // Log details for each critical mismatch
+      criticalMismatches.forEach(mismatch => {
+        this.logger.error(`Critical reconciliation mismatch`, {
+          transactionId: mismatch.transactionId,
+          type: mismatch.type,
+          details: mismatch.details,
+          fixStrategy: mismatch.fixStrategy
+        });
+      });
+    }
+
+    // Generate alert for high severity mismatches
+    if (highMismatches.length > 0) {
+      this.alertDetector.addRule({
+        name: `reconciliation_high_${reconciliationId}`,
+        condition: () => true,
+        severity: 'high',
+        description: `Found ${highMismatches.length} high severity mismatches during reconciliation.`
+      });
+    }
+  }
+
+  /**
+   * Create empty result for when no transactions are found
+   */
+  private createEmptyResult(reconciliationId: string): ReconciliationResult {
+    return {
+      id: reconciliationId,
+      timestamp: new Date(),
+      source: 'internal',
+      transactionsChecked: 0,
+      mismatches: [],
+      summary: {
+        succeeded: 0,
+        failed: 0,
+        inProgress: 0,
+        inconsistent: 0,
+        orphaned: 0,
+        missing: 0
+      }
+    };
+  }
+}
+
+/**
+ * Interface for external transaction data
+ */
+export interface ExternalTransaction {
+  externalId: string;
+  internalId?: string;
+  status: string;
+  amount: number;
+  currency: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * Interface for adapters to external payment systems
+ */
+export interface ExternalSystemAdapter {
+  getTransactions(
+    references: Array<{
+      internalId: string;
+      externalId: string;
+      amount: number;
+      currency: string;
+    }>,
+    systemId?: string
+  ): Promise<ExternalTransaction[]>;
+}
     
  
