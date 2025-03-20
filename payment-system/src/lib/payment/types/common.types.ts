@@ -1,4 +1,8 @@
 // src/lib/payment/types/common.types.ts
+
+import { Transaction, TransactionType, TransactionStatus, TransactionError } from './transaction.types';
+export { Transaction, TransactionType, TransactionStatus, TransactionError };
+
 export interface PaymentAmount {
   amount: number;
   currency: string;
@@ -50,26 +54,3 @@ export interface Transaction {
   error?: TransactionError;
 }
 
-export enum TransactionType {
-  PAYMENT = 'PAYMENT',
-  REFUND = 'REFUND',
-  CHARGEBACK = 'CHARGEBACK'
-}
-
-export enum TransactionStatus {
-  PENDING = 'PENDING',
-  PROCESSING = 'PROCESSING',
-  COMPLETED = 'COMPLETED',
-  FAILED = 'FAILED',
-  ROLLED_BACK = 'ROLLED_BACK',
-  RECOVERY_PENDING = 'RECOVERY_PENDING',
-  RECOVERY_IN_PROGRESS = 'RECOVERY_IN_PROGRESS'
-}
-
-export interface TransactionError {
-  code: string;
-  message: string;
-  recoverable: boolean;
-  retryable: boolean;
-  details?: Record<string, any>;
-}
