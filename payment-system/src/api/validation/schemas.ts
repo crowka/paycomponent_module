@@ -1,12 +1,6 @@
 // src/api/validation/schemas.ts
 import { z } from 'zod';
-import {
-  PaymentMethodType,
-  TransactionType,
-  TransactionStatus,
-  ComplianceCategory,
-  ReportType
-} from '../../lib/payment/types';
+import { TransactionStatus } from '../../lib/payment/types/transaction.types';
 
 // Import from enhanced-schemas to avoid duplication
 import {
