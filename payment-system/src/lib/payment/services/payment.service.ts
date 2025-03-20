@@ -1,461 +1,303 @@
 // src/lib/payment/services/payment.service.ts
+import { v4 as uuidv4 } from 'uuid';
 import { 
-  PaymentProviderInterface,
-  CreatePaymentInput,
-  PaymentResult,
-  PaymentMethod,
-  AddPaymentMethodInput,
-  ProviderConfig
-} from '../types/provider.types';
-import { validatePaymentInput, validateAddPaymentMethodInput } from '../utils/validation';
-import { encrypt, decrypt } from '../utils/encryption';
+  PaymentError, 
+  ErrorCode, 
+  errorHandler 
+} from '../utils/error';
 import { PaymentLogger } from '../utils/logger';
-import { EventEmitter } from '../events/event.emitter';
-import { errorHandler, ErrorCode, PaymentError } from '../utils/error';
-
-export interface PaymentServiceOptions {
-  logLevel?: 'debug' | 'info' | 'warn' | 'error';
-  eventEmitter?: EventEmitter;
-}
+import { 
+  CreatePaymentInput, 
+  PaymentResult, 
+  TransactionType, 
+  TransactionStatus 
+} from '../types';
+import { validatePaymentInput } from '../validators/payment.validator';
 
 export class PaymentService {
   private logger: PaymentLogger;
-  private eventEmitter?: EventEmitter;
+  private provider: any; // PaymentProvider
+  private transactionManager: any; // TransactionManager
 
-  constructor(
-    private provider: PaymentProviderInterface,
-    private options: PaymentServiceOptions = {}
-  ) {
-    // Validate that provider implements the required interface
-    if (!provider || typeof provider.createPayment !== 'function') {
-      throw errorHandler.createError(
-        'Invalid payment provider',
-        ErrorCode.CONFIGURATION_ERROR,
-        { provider: provider?.constructor?.name || 'unknown' }
-      );
-    }
-    
-    this.logger = new PaymentLogger(options.logLevel || 'info', 'PaymentService');
-    this.eventEmitter = options.eventEmitter;
-    
-    this.logger.info('Payment service initialized', { 
-      provider: provider.constructor.name 
-    });
+  constructor(provider: any, transactionManager: any) {
+    this.logger = new PaymentLogger();
+    this.provider = provider;
+    this.transactionManager = transactionManager;
   }
 
+  /**
+   * Processes a payment request
+   * @param input Payment input data
+   * @returns Payment processing result
+   */
   async processPayment(input: CreatePaymentInput): Promise<PaymentResult> {
     const operationId = this.generateOperationId();
-    this.logger.info(`[${operationId}] Processing payment`, { 
+    const requestId = input.metadata?.requestId || uuidv4();
+    const context = { 
+      operationId,
+      requestId,
       amount: input.amount,
-      customerId: input.customer.id
-    });
+      customerId: input.customer.id,
+      idempotencyKey: input.metadata?.idempotencyKey
+    };
+    
+    this.logger.info(`[${operationId}] Processing payment`, context);
     
     try {
-      // Validate input
+      // Input validation
       try {
         validatePaymentInput(input);
-      } catch (error) {
-        this.logger.error(`[${operationId}] Payment validation failed`, { error });
-        throw errorHandler.wrapError(
-          error,
+      } catch (validationError) {
+        throw errorHandler.createError(
           'Payment validation failed',
           ErrorCode.PAYMENT_VALIDATION_FAILED,
-          { 
+          { ...context, validationErrors: validationError.errors },
+          validationError
+        );
+      }
+      
+      // Create transaction record first (for idempotency)
+      let transaction;
+      try {
+        transaction = await this.transactionManager.beginTransaction(
+          TransactionType.PAYMENT,
+          {
+            amount: input.amount.amount,
+            currency: input.amount.currency,
             customerId: input.customer.id,
-            amount: input.amount
+            paymentMethodId: typeof input.paymentMethod === 'string' 
+              ? input.paymentMethod 
+              : input.paymentMethod.id,
+            idempotencyKey: input.metadata?.idempotencyKey || uuidv4(),
+            metadata: {
+              ...input.metadata,
+              operationId,
+              requestId
+            }
           }
         );
-      }
-
-      // Encrypt sensitive data
-      let encryptedData: CreatePaymentInput;
-      try {
-        encryptedData = await this.encryptSensitiveData(input);
-      } catch (error) {
-        this.logger.error(`[${operationId}] Data encryption failed`, { error });
+      } catch (txError) {
+        // Check for idempotency conflicts
+        if (txError.code === 'DUPLICATE_TRANSACTION') {
+          throw errorHandler.createError(
+            'Duplicate payment request detected',
+            ErrorCode.DUPLICATE_REQUEST,
+            { ...context, existingTransactionId: txError.transactionId },
+            txError
+          );
+        }
+        
         throw errorHandler.wrapError(
-          error,
-          'Failed to secure payment data',
-          ErrorCode.INTERNAL_ERROR
+          txError,
+          'Failed to create transaction record',
+          ErrorCode.INTERNAL_ERROR,
+          context
         );
       }
-
-      // Process payment
-      this.logger.info(`[${operationId}] Calling payment provider`);
-      const result = await this.provider.createPayment(encryptedData)
-        .catch(error => {
-          this.logger.error(`[${operationId}] Provider error`, { error });
-          throw errorHandler.wrapError(
-            error,
-            'Payment provider error',
-            ErrorCode.PROVIDER_ERROR,
-            { 
-              providerName: this.provider.constructor.name,
-              errorCode: error.code
+      
+      // Update transaction to processing
+      try {
+        await this.transactionManager.updateTransactionStatus(
+          transaction.id,
+          TransactionStatus.PROCESSING
+        );
+      } catch (updateError) {
+        throw errorHandler.wrapError(
+          updateError,
+          'Failed to update transaction status',
+          ErrorCode.TRANSACTION_INVALID_STATE,
+          { ...context, transactionId: transaction.id }
+        );
+      }
+      
+      // Process with payment provider
+      try {
+        const result = await this.provider.createPayment(input);
+        
+        if (result.success) {
+          // Update transaction to completed
+          await this.transactionManager.updateTransactionStatus(
+            transaction.id,
+            TransactionStatus.COMPLETED,
+            { providerTransactionId: result.providerTransactionId }
+          );
+          
+          this.logger.info(`[${operationId}] Payment processed successfully`, {
+            transactionId: transaction.id,
+            providerTransactionId: result.providerTransactionId
+          });
+          
+          return {
+            ...result,
+            transactionId: transaction.id,
+            requestId
+          };
+        } else {
+          // Handle payment failure
+          const errorCode = this.mapProviderErrorCode(result.error?.code);
+          const error = errorHandler.createError(
+            result.error?.message || 'Payment processing failed',
+            errorCode,
+            {
+              ...context,
+              transactionId: transaction.id,
+              providerErrorCode: result.error?.code,
+              providerErrorDetails: result.error?.details,
+              recoverable: this.isErrorRecoverable(result.error?.code),
+              retryable: this.isErrorRetryable(result.error?.code)
             }
           );
-        });
-
-      // Log result
-      if (result.success) {
-        this.logger.info(`[${operationId}] Payment successful`, { 
-          transactionId: result.transactionId 
-        });
-        
-        if (this.eventEmitter) {
-          try {
-            await this.eventEmitter.emit('payment.succeeded', {
-              transactionId: result.transactionId,
-              amount: input.amount,
-              customerId: input.customer.id
-            });
-          } catch (error) {
-            // Non-critical error, just log it
-            this.logger.warn(`[${operationId}] Failed to emit success event`, { error });
-          }
-        }
-      } else {
-        this.logger.error(`[${operationId}] Payment failed`, { error: result.error });
-        
-        if (this.eventEmitter && result.error) {
-          try {
-            await this.eventEmitter.emit('payment.failed', {
-              error: result.error,
-              amount: input.amount,
-              customerId: input.customer.id
-            });
-          } catch (error) {
-            // Non-critical error, just log it
-            this.logger.warn(`[${operationId}] Failed to emit failure event`, { error });
-          }
-        }
-      }
-
-      return result;
-    } catch (error) {
-      // If it's already a PaymentError, just propagate it
-      if (error instanceof PaymentError) {
-        throw error;
-      }
-      
-      // Wrap other errors
-      this.logger.error(`[${operationId}] Unhandled payment error`, { 
-        error, 
-        stack: error.stack 
-      });
-      
-      throw errorHandler.wrapError(
-        error,
-        'Payment processing error',
-        ErrorCode.PAYMENT_FAILED,
-        { customerId: input.customer.id }
-      );
-    }
-  }
-
-  async confirmPayment(paymentId: string): Promise<PaymentResult> {
-    const operationId = this.generateOperationId();
-    this.logger.info(`[${operationId}] Confirming payment`, { paymentId });
-    
-    try {
-      if (!paymentId) {
-        throw errorHandler.createError(
-          'Payment ID is required',
-          ErrorCode.VALIDATION_ERROR
-        );
-      }
-      
-      const result = await this.provider.confirmPayment(paymentId)
-        .catch(error => {
-          this.logger.error(`[${operationId}] Provider error during confirmation`, { 
-            error, 
-            paymentId 
-          });
           
-          throw errorHandler.wrapError(
-            error,
-            'Payment confirmation failed',
-            ErrorCode.PAYMENT_CONFIRMATION_FAILED,
-            { paymentId }
+          await this.transactionManager.handleTransactionError(
+            transaction.id,
+            {
+              code: error.code,
+              message: error.message,
+              details: error.context
+            }
           );
-        });
-      
-      if (result.success) {
-        this.logger.info(`[${operationId}] Payment confirmed`, { 
-          transactionId: result.transactionId 
+          
+          return {
+            success: false,
+            transactionId: transaction.id,
+            requestId,
+            error: {
+              code: error.code,
+              message: error.message,
+              details: process.env.NODE_ENV === 'production' ? undefined : error.context
+            }
+          };
+        }
+      } catch (providerError) {
+        // Determine if error is recoverable/retryable
+        const errorCode = this.mapProviderErrorCode(providerError.code);
+        const error = errorHandler.wrapError(
+          providerError,
+          providerError.message || 'Payment provider error',
+          errorCode,
+          {
+            ...context,
+            transactionId: transaction.id,
+            provider: this.provider.constructor.name,
+            recoverable: this.isErrorRecoverable(providerError.code),
+            retryable: this.isErrorRetryable(providerError.code)
+          }
+        );
+        
+        // Log the provider error
+        this.logger.error(`[${operationId}] Provider error during payment processing`, {
+          error: providerError,
+          transactionId: transaction.id,
+          errorCode: error.code
         });
         
-        if (this.eventEmitter) {
-          try {
-            await this.eventEmitter.emit('payment.confirmed', {
-              transactionId: result.transactionId
-            });
-          } catch (error) {
-            this.logger.warn(`[${operationId}] Failed to emit confirmation event`, { error });
+        // Handle transaction error through manager
+        await this.transactionManager.handleTransactionError(
+          transaction.id,
+          {
+            code: error.code,
+            message: error.message,
+            details: error.context
           }
-        }
-      } else {
-        this.logger.error(`[${operationId}] Payment confirmation failed`, { 
-          error: result.error 
-        });
-      }
-      
-      return result;
-    } catch (error) {
-      if (error instanceof PaymentError) {
-        throw error;
-      }
-      
-      this.logger.error(`[${operationId}] Unhandled confirmation error`, { 
-        error, 
-        paymentId 
-      });
-      
-      throw errorHandler.wrapError(
-        error,
-        'Payment confirmation error',
-        ErrorCode.PAYMENT_CONFIRMATION_FAILED,
-        { paymentId }
-      );
-    }
-  }
-
-  async getPaymentMethods(customerId: string): Promise<PaymentMethod[]> {
-    const operationId = this.generateOperationId();
-    this.logger.info(`[${operationId}] Fetching payment methods`, { customerId });
-    
-    try {
-      if (!customerId) {
-        throw errorHandler.createError(
-          'Customer ID is required',
-          ErrorCode.VALIDATION_ERROR
         );
-      }
-      
-      const methods = await this.provider.getPaymentMethods(customerId)
-        .catch(error => {
-          this.logger.error(`[${operationId}] Error fetching payment methods`, { 
-            error, 
-            customerId 
-          });
-          
-          throw errorHandler.wrapError(
-            error,
-            'Failed to fetch payment methods',
-            ErrorCode.PROVIDER_ERROR,
-            { customerId }
-          );
-        });
-      
-      this.logger.info(`[${operationId}] Retrieved ${methods.length} payment methods`);
-      
-      return methods.map(method => ({
-        ...method,
-        details: this.maskSensitiveData(method.details)
-      }));
-    } catch (error) {
-      if (error instanceof PaymentError) {
-        throw error;
-      }
-      
-      this.logger.error(`[${operationId}] Unhandled error fetching payment methods`, { 
-        error, 
-        customerId 
-      });
-      
-      throw errorHandler.wrapError(
-        error,
-        'Error fetching payment methods',
-        ErrorCode.INTERNAL_ERROR,
-        { customerId }
-      );
-    }
-  }
-
-  async addPaymentMethod(
-    customerId: string,
-    input: AddPaymentMethodInput
-  ): Promise<PaymentMethod> {
-    const operationId = this.generateOperationId();
-    this.logger.info(`[${operationId}] Adding payment method`, { 
-      customerId, 
-      type: input.type 
-    });
-    
-    try {
-      // Validate input
-      validateAddPaymentMethodInput(input);
-      
-      if (!customerId) {
-        throw errorHandler.createError(
-          'Customer ID is required',
-          ErrorCode.VALIDATION_ERROR
-        );
-      }
-      
-      // Encrypt sensitive details
-      let encryptedInput: AddPaymentMethodInput;
-      try {
-        const encryptedDetails = await encrypt(input.details);
-        encryptedInput = {
-          ...input,
-          details: encryptedDetails
+        
+        // Return standardized error response
+        return {
+          success: false,
+          transactionId: transaction.id,
+          requestId,
+          error: {
+            code: error.code,
+            message: error.message,
+            details: process.env.NODE_ENV === 'production' ? undefined : error.context
+          }
         };
-      } catch (error) {
-        this.logger.error(`[${operationId}] Error encrypting payment method details`, { error });
-        throw errorHandler.wrapError(
-          error,
-          'Failed to secure payment method data',
-          ErrorCode.INTERNAL_ERROR
-        );
       }
-      
-      // Add the payment method
-      const method = await this.provider.addPaymentMethod(customerId, encryptedInput)
-        .catch(error => {
-          this.logger.error(`[${operationId}] Provider error adding payment method`, { 
-            error, 
-            customerId 
-          });
-          
-          throw errorHandler.wrapError(
-            error,
-            'Failed to add payment method',
-            ErrorCode.PROVIDER_ERROR,
-            { 
-              customerId,
-              methodType: input.type
-            }
-          );
-        });
-
-      this.logger.info(`[${operationId}] Payment method added`, { 
-        methodId: method.id, 
-        type: method.type 
-      });
-
-      if (this.eventEmitter) {
-        try {
-          await this.eventEmitter.emit('payment_method.added', {
-            customerId,
-            methodId: method.id,
-            type: method.type
-          });
-        } catch (error) {
-          this.logger.warn(`[${operationId}] Failed to emit payment method event`, { error });
-        }
-      }
-
-      return {
-        ...method,
-        details: this.maskSensitiveData(method.details)
-      };
     } catch (error) {
-      if (error instanceof PaymentError) {
-        throw error;
-      }
+      // Handle unexpected errors
+      const paymentError = error instanceof PaymentError 
+        ? error 
+        : errorHandler.wrapError(
+            error,
+            'An unexpected error occurred during payment processing',
+            ErrorCode.INTERNAL_ERROR,
+            context,
+            false // Mark as non-operational for critical errors
+          );
       
-      this.logger.error(`[${operationId}] Unhandled error adding payment method`, { 
-        error, 
-        customerId 
-      });
+      // Log the error
+      errorHandler.handleError(paymentError);
       
-      throw errorHandler.wrapError(
-        error,
-        'Error adding payment method',
-        ErrorCode.INTERNAL_ERROR,
-        { 
-          customerId,
-          methodType: input.type 
+      // Return standardized error response
+      return {
+        success: false,
+        requestId,
+        error: {
+          code: paymentError.code,
+          message: paymentError.message,
+          details: process.env.NODE_ENV === 'production' ? undefined : paymentError.context
         }
-      );
+      };
     }
   }
 
-  async removePaymentMethod(methodId: string): Promise<void> {
-    const operationId = this.generateOperationId();
-    this.logger.info(`[${operationId}] Removing payment method`, { methodId });
+  /**
+   * Maps provider-specific error codes to our standard error codes
+   */
+  private mapProviderErrorCode(providerCode?: string): ErrorCode {
+    if (!providerCode) return ErrorCode.PAYMENT_FAILED;
     
-    try {
-      if (!methodId) {
-        throw errorHandler.createError(
-          'Payment method ID is required',
-          ErrorCode.VALIDATION_ERROR
-        );
-      }
-      
-      await this.provider.removePaymentMethod(methodId)
-        .catch(error => {
-          this.logger.error(`[${operationId}] Provider error removing payment method`, { 
-            error, 
-            methodId 
-          });
-          
-          throw errorHandler.wrapError(
-            error,
-            'Failed to remove payment method',
-            ErrorCode.PROVIDER_ERROR,
-            { methodId }
-          );
-        });
-      
-      this.logger.info(`[${operationId}] Payment method removed`);
-      
-      if (this.eventEmitter) {
-        try {
-          await this.eventEmitter.emit('payment_method.removed', { methodId });
-        } catch (error) {
-          this.logger.warn(`[${operationId}] Failed to emit payment method removal event`, { error });
-        }
-      }
-    } catch (error) {
-      if (error instanceof PaymentError) {
-        throw error;
-      }
-      
-      this.logger.error(`[${operationId}] Unhandled error removing payment method`, { 
-        error, 
-        methodId 
-      });
-      
-      throw errorHandler.wrapError(
-        error,
-        'Error removing payment method',
-        ErrorCode.INTERNAL_ERROR,
-        { methodId }
-      );
-    }
+    // Map provider-specific error codes to our standard error codes
+    const errorCodeMap: Record<string, ErrorCode> = {
+      'insufficient_funds': ErrorCode.PAYMENT_FAILED,
+      'card_declined': ErrorCode.PAYMENT_FAILED,
+      'invalid_card': ErrorCode.PAYMENT_METHOD_INVALID,
+      'expired_card': ErrorCode.PAYMENT_METHOD_INVALID,
+      'processing_error': ErrorCode.PROVIDER_ERROR,
+      'api_connection_error': ErrorCode.PROVIDER_COMMUNICATION_ERROR,
+      'authentication_error': ErrorCode.AUTHENTICATION_ERROR,
+      'rate_limit_error': ErrorCode.PROVIDER_ERROR,
+      'invalid_request': ErrorCode.VALIDATION_ERROR,
+      'idempotency_error': ErrorCode.IDEMPOTENCY_ERROR
+    };
+    
+    return errorCodeMap[providerCode] || ErrorCode.PROVIDER_ERROR;
   }
-
+  
+  /**
+   * Determines if an error is recoverable (can be fixed by the user)
+   */
+  private isErrorRecoverable(errorCode?: string): boolean {
+    const recoverableErrors = [
+      'insufficient_funds',
+      'card_declined',
+      'invalid_card',
+      'expired_card',
+      'authentication_required'
+    ];
+    
+    return errorCode ? recoverableErrors.includes(errorCode) : false;
+  }
+  
+  /**
+   * Determines if an error is retryable (can be retried automatically)
+   */
+  private isErrorRetryable(errorCode?: string): boolean {
+    const retryableErrors = [
+      'api_connection_error',
+      'processing_error',
+      'rate_limit_error',
+      'network_error',
+      'timeout_error'
+    ];
+    
+    return errorCode ? retryableErrors.includes(errorCode) : false;
+  }
+  
+  /**
+   * Generates a unique operation ID for tracking
+   */
   private generateOperationId(): string {
-    return Math.random().toString(36).substring(2, 10);
-  }
-
-  private async encryptSensitiveData(data: CreatePaymentInput): Promise<CreatePaymentInput> {
-    if (typeof data.paymentMethod === 'object') {
-      return {
-        ...data,
-        paymentMethod: {
-          ...data.paymentMethod,
-          details: await encrypt(data.paymentMethod.details)
-        }
-      };
-    }
-    return data;
-  }
-
-  private maskSensitiveData(data: Record<string, any>): Record<string, any> {
-    const masked = { ...data };
-    if (masked.cardNumber) {
-      masked.cardNumber = `****${masked.cardNumber.slice(-4)}`;
-    }
-    if (masked.number) {
-      masked.number = `****${masked.number.slice(-4)}`;
-    }
-    if (masked.cvc || masked.cvv) {
-      masked.cvc = '***';
-      masked.cvv = '***';
-    }
-    return masked;
+    return `pay_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
   }
 }
