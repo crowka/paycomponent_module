@@ -4,7 +4,7 @@ import { TransactionManager } from '../../lib/payment/transaction/managers/trans
 import { HealthChecker } from '../../lib/payment/monitoring/health/checker';
 import { MetricsCollector } from '../../lib/payment/monitoring/metrics/collector';
 import { AlertDetector } from '../../lib/payment/monitoring/alerts/detector';
-import { TransactionType, TransactionStatus } from '../../lib/payment/transaction/types';
+import { TransactionType, TransactionStatus } from '../../lib/payment/types/transaction.types';
 
 export class TransactionController {
   constructor(
