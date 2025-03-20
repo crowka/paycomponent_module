@@ -42,6 +42,16 @@ export interface ErrorContext {
   [key: string]: any;
 }
 
+export interface ErrorResponse {
+  statusCode: number;
+  body: {
+    error: string;
+    message: string;
+    code?: string;
+    details?: Record<string, any>;
+  };
+}
+
 export class PaymentError extends Error {
   code: ErrorCode;
   context?: ErrorContext;
@@ -116,6 +126,69 @@ export class ErrorHandler {
       originalError,
       isOperational
     );
+  }
+
+  handleControllerError(error: any, defaultMessage: string): ErrorResponse {
+    // Default error response
+    const response: ErrorResponse = {
+      statusCode: 500,
+      body: {
+        error: 'Internal Server Error',
+        message: defaultMessage || 'An unexpected error occurred'
+      }
+    };
+
+    // Handle payment errors
+    if (error instanceof PaymentError) {
+      switch (error.code) {
+        case ErrorCode.VALIDATION_ERROR:
+        case ErrorCode.PAYMENT_VALIDATION_FAILED:
+        case ErrorCode.PAYMENT_METHOD_INVALID:
+          response.statusCode = 400;
+          break;
+        case ErrorCode.AUTHENTICATION_ERROR:
+          response.statusCode = 401;
+          break;
+        case ErrorCode.AUTHORIZATION_ERROR:
+          response.statusCode = 403;
+          break;
+        case ErrorCode.TRANSACTION_NOT_FOUND:
+        case ErrorCode.CUSTOMER_NOT_FOUND:
+          response.statusCode = 404;
+          break;
+        case ErrorCode.DUPLICATE_REQUEST:
+        case ErrorCode.IDEMPOTENCY_ERROR:
+          response.statusCode = 409;
+          break;
+        case ErrorCode.PROVIDER_ERROR:
+        case ErrorCode.PROVIDER_COMMUNICATION_ERROR:
+          response.statusCode = 502;
+          break;
+        default:
+          response.statusCode = 500;
+      }
+
+      response.body = {
+        error: error.code,
+        message: error.message,
+        code: error.code,
+        details: error.context
+      };
+    } else if (error.name === 'ZodError') {
+      // Handle validation errors
+      response.statusCode = 400;
+      response.body = {
+        error: 'Validation Error',
+        message: 'Request validation failed',
+        code: ErrorCode.VALIDATION_ERROR,
+        details: error.errors
+      };
+    } else {
+      // Handle generic errors
+      console.error('Unhandled error in controller:', error);
+    }
+
+    return response;
   }
 
   private isOperationalError(error: Error): boolean {
