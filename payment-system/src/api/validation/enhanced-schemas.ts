@@ -1,13 +1,53 @@
 // src/api/validation/enhanced-schemas.ts
 import { z } from 'zod';
 import { 
-  PaymentMethodType,
   TransactionType, 
-  TransactionStatus,
-  ComplianceCategory,
-  ReportType,
-  WebhookEventType
-} from '../../lib/payment/types';
+  TransactionStatus
+} from '../../lib/payment/types/transaction.types';
+
+// Import other types you need for your schemas
+// For example:
+// import { PaymentMethodType } from '../../lib/payment/types/payment.types';
+// import { ComplianceCategory } from '../../lib/payment/types/compliance.types';
+// import { ReportType } from '../../lib/payment/types/analytics.types';
+// import { WebhookEventType } from '../../lib/payment/types/webhook.types';
+
+// Placeholder imports until we standardize all types
+// Replace these with actual imports as you standardize each type
+const PaymentMethodType = {
+  CREDIT_CARD: 'credit_card',
+  DEBIT_CARD: 'debit_card',
+  BANK_ACCOUNT: 'bank_account',
+  DIGITAL_WALLET: 'digital_wallet',
+  CRYPTO: 'crypto'
+};
+
+const ComplianceCategory = {
+  KYC: 'kyc',
+  AML: 'aml',
+  DATA_PROTECTION: 'data_protection',
+  TRANSACTION_LIMITS: 'transaction_limits',
+  REPORTING: 'reporting'
+};
+
+const ReportType = {
+  TRANSACTION_VOLUME: 'transaction_volume',
+  REVENUE: 'revenue',
+  PAYMENT_METHODS: 'payment_methods',
+  CURRENCY_USAGE: 'currency_usage',
+  RISK_ANALYSIS: 'risk_analysis',
+  COMPLIANCE: 'compliance'
+};
+
+const WebhookEventType = {
+  PAYMENT_SUCCEEDED: 'payment.succeeded',
+  PAYMENT_FAILED: 'payment.failed',
+  PAYMENT_REFUNDED: 'payment.refunded',
+  PAYMENT_DISPUTED: 'payment.disputed',
+  METHOD_ADDED: 'payment_method.added',
+  METHOD_UPDATED: 'payment_method.updated',
+  METHOD_REMOVED: 'payment_method.removed'
+};
 
 // Currency and Amount Validation
 export const currencySchema = z.string().length(3, 'Currency must be a 3-letter code')
@@ -96,7 +136,13 @@ export const paymentMethodDetailsSchema = z.object({
 });
 
 export const paymentMethodSchema = z.object({
-  type: z.nativeEnum(PaymentMethodType),
+  type: z.enum([
+    PaymentMethodType.CREDIT_CARD,
+    PaymentMethodType.DEBIT_CARD,
+    PaymentMethodType.BANK_ACCOUNT,
+    PaymentMethodType.DIGITAL_WALLET,
+    PaymentMethodType.CRYPTO
+  ]),
   provider: z.string(),
   details: paymentMethodDetailsSchema,
   setAsDefault: z.boolean().optional()
@@ -139,7 +185,14 @@ export const metricsQuerySchema = z.object({
 });
 
 export const reportQuerySchema = z.object({
-  type: z.nativeEnum(ReportType),
+  type: z.enum([
+    ReportType.TRANSACTION_VOLUME,
+    ReportType.REVENUE,
+    ReportType.PAYMENT_METHODS,
+    ReportType.CURRENCY_USAGE,
+    ReportType.RISK_ANALYSIS,
+    ReportType.COMPLIANCE
+  ]),
   startDate: z.string().datetime(),
   endDate: z.string().datetime().refine(
     (date, ctx) => {
@@ -155,7 +208,13 @@ export const reportQuerySchema = z.object({
 // Compliance Schemas
 export const complianceValidationSchema = z.object({
   data: z.record(z.unknown()),
-  categories: z.array(z.nativeEnum(ComplianceCategory)),
+  categories: z.array(z.enum([
+    ComplianceCategory.KYC,
+    ComplianceCategory.AML,
+    ComplianceCategory.DATA_PROTECTION,
+    ComplianceCategory.TRANSACTION_LIMITS,
+    ComplianceCategory.REPORTING
+  ])),
 });
 
 export const auditLogsQuerySchema = z.object({
