@@ -19,10 +19,25 @@ export const amountSchema = z.number()
   .multipleOf(0.01, 'Amount must have at most 2 decimal places');
 
 // Enhanced Customer Validation
-export const customerProfileValidation = z.object({
+export const customerPreferencesSchema = z.object({
+  communicationChannel: z.enum(['email', 'sms', 'push']),
+  savePaymentMethods: z.boolean(),
+  autoPayEnabled: z.boolean()
+});
+
+export const spendingLimitsSchema = z.object({
+  daily: z.number().positive().optional(),
+  weekly: z.number().positive().optional(),
+  monthly: z.number().positive().optional(),
+  perTransaction: z.number().positive().optional(),
+  currency: currencySchema
+});
+
+export const customerProfileSchema = z.object({
   email: z.string().email('Valid email required'),
-  name: z.string().min(1, 'Name is required'),
+  name: z.string().min(1, 'Name is required').optional(),
   phoneNumber: z.string().regex(/^\+?[1-9]\d{1,14}$/, 'Invalid phone number format').optional(),
+  defaultCurrency: currencySchema.optional(),
   address: z.object({
     line1: z.string().min(1, 'Address line 1 is required'),
     line2: z.string().optional(),
@@ -31,122 +46,14 @@ export const customerProfileValidation = z.object({
     postalCode: z.string().min(1, 'Postal code is required'),
     country: z.string().length(2, 'Country must be ISO 2-letter code')
   }).optional(),
+  preferences: customerPreferencesSchema.optional(),
+  limits: spendingLimitsSchema.optional(),
   taxId: z.string().optional(),
   metadata: z.record(z.unknown()).optional()
 });
 
-// Enhanced Payment Method Validation
-export const paymentMethodValidation = z.object({
-  type: z.nativeEnum(PaymentMethodType),
-  billingDetails: z.object({
-    name: z.string().min(1, 'Cardholder name is required'),
-    email: z.string().email('Valid email required').optional(),
-    phone: z.string().optional(),
-    address: z.object({
-      line1: z.string().min(1, 'Address line 1 is required'),
-      line2: z.string().optional(),
-      city: z.string().min(1, 'City is required'),
-      state: z.string().min(1, 'State is required'),
-      postalCode: z.string().min(1, 'Postal code is required'),
-      country: z.string().length(2, 'Country must be ISO 2-letter code')
-    })
-  }),
-  card: z.object({
-    number: z.string()
-      .regex(/^[0-9]{13,19}$/, 'Invalid card number')
-      .refine((num) => validateLuhn(num), 'Invalid card number checksum'),
-    expMonth: z.number().min(1).max(12),
-    expYear: z.number()
-      .min(new Date().getFullYear() % 100)
-      .max((new Date().getFullYear() % 100) + 20),
-    cvc: z.string().regex(/^[0-9]{3,4}$/, 'Invalid CVC')
-  }).optional(),
-  bankAccount: z.object({
-    accountNumber: z.string().min(1, 'Account number is required'),
-    routingNumber: z.string().min(1, 'Routing number is required'),
-    accountType: z.enum(['checking', 'savings']),
-    accountHolderType: z.enum(['individual', 'company'])
-  }).optional(),
-  setAsDefault: z.boolean().optional()
-}).refine(data => {
-  // At least one payment method detail must be provided
-  return Boolean(data.card) || Boolean(data.bankAccount);
-}, 'Either card or bank account details must be provided');
-
-// Transaction Validation
-export const transactionValidation = z.object({
-  type: z.nativeEnum(TransactionType),
-  amount: amountSchema,
-  currency: currencySchema,
-  paymentMethodId: z.string().uuid('Invalid payment method ID'),
-  description: z.string().optional(),
-  metadata: z.record(z.unknown()).optional(),
-  idempotencyKey: z.string().min(8).max(64),
-  returnUrl: z.string().url().optional(),
-  confirmation: z.object({
-    type: z.enum(['immediate', 'manual']),
-    methodType: z.enum(['automatic', '3ds', 'redirect']).optional()
-  }).optional()
-});
-
-// Compliance Validation
-export const complianceValidation = z.object({
-  checkType: z.enum(['kyc', 'aml', 'sanctions']),
-  customerId: z.string().uuid('Invalid customer ID'),
-  documentType: z.enum(['passport', 'id_card', 'drivers_license', 'company_registration']).optional(),
-  documentNumber: z.string().optional(),
-  metadata: z.record(z.unknown()).optional()
-});
-
-// Analytics Validation
-export const analyticsQueryValidation = z.object({
-  startDate: z.string().datetime(),
-  endDate: z.string().datetime(),
-  dimensions: z.array(z.string()).min(1),
-  metrics: z.array(z.string()).min(1),
-  filters: z.array(z.object({
-    field: z.string(),
-    operator: z.enum(['eq', 'gt', 'lt', 'gte', 'lte', 'in', 'not_in']),
-    value: z.unknown()
-  })).optional(),
-  sort: z.array(z.object({
-    field: z.string(),
-    direction: z.enum(['asc', 'desc'])
-  })).optional(),
-  limit: z.number().positive().max(1000).optional(),
-  offset: z.number().nonnegative().optional()
-}).refine(data => {
-  const start = new Date(data.startDate);
-  const end = new Date(data.endDate);
-  return end > start;
-}, 'End date must be after start date');
-
-// Webhook Validation
-export const webhookValidation = z.object({
-  url: z.string().url('Invalid webhook URL'),
-  description: z.string().optional(),
-  events: z.array(z.nativeEnum(WebhookEventType)).min(1),
-  enabled: z.boolean().optional(),
-  metadata: z.record(z.unknown()).optional(),
-  authentication: z.object({
-    type: z.enum(['basic', 'bearer', 'hmac']),
-    credentials: z.record(z.string()).optional()
-  }).optional()
-});
-
-// Currency Exchange Validation
-export const currencyExchangeValidation = z.object({
-  sourceCurrency: currencySchema,
-  targetCurrency: currencySchema,
-  amount: amountSchema,
-  targetAmount: amountSchema.optional(),
-  type: z.enum(['fixed_source', 'fixed_target']).optional(),
-  preferredProvider: z.string().optional()
-}).refine(data => data.sourceCurrency !== data.targetCurrency, 
-  'Source and target currencies must be different');
-
-// Helper Functions
-function validateLuhn(cardNumber: string): boolean {
+// Card validation helpers
+export function validateLuhn(cardNumber: string): boolean {
   let sum = 0;
   let isEven = false;
   
@@ -168,20 +75,132 @@ function validateLuhn(cardNumber: string): boolean {
   return (sum % 10) === 0;
 }
 
+// Enhanced Payment Method Validation
+export const paymentMethodDetailsSchema = z.object({
+  last4: z.string().optional(),
+  brand: z.string().optional(),
+  expiryMonth: z.number().min(1).max(12).optional(),
+  expiryYear: z.number().optional(),
+  number: z.string().optional().refine(
+    val => !val || validateLuhn(val),
+    { message: 'Invalid card number' }
+  ),
+  cvc: z.string().optional().refine(
+    val => !val || /^\d{3,4}$/.test(val),
+    { message: 'CVC must be 3 or 4 digits' }
+  ),
+  bankName: z.string().optional(),
+  accountType: z.string().optional(),
+  walletType: z.string().optional(),
+  cryptoCurrency: z.string().optional()
+});
+
+export const paymentMethodSchema = z.object({
+  type: z.nativeEnum(PaymentMethodType),
+  provider: z.string(),
+  details: paymentMethodDetailsSchema,
+  setAsDefault: z.boolean().optional()
+});
+
+// Currency Conversion Schema
+export const currencyConversionSchema = z.object({
+  amount: amountSchema,
+  from: currencySchema,
+  to: currencySchema
+}).refine(data => data.from !== data.to, 'Source and target currencies must be different');
+
+// Transaction Schemas
+export const transactionSchema = z.object({
+  type: z.nativeEnum(TransactionType),
+  amount: amountSchema,
+  currency: currencySchema,
+  customerId: z.string().min(1, 'Customer ID is required'),
+  paymentMethodId: z.string().min(1, 'Payment method ID is required'),
+  idempotencyKey: z.string().min(8, 'Idempotency key must be at least 8 characters'),
+  metadata: z.record(z.any()).optional(),
+  description: z.string().optional(),
+  returnUrl: z.string().url().optional()
+});
+
+export const transactionQuerySchema = z.object({
+  status: z.nativeEnum(TransactionStatus).optional(),
+  type: z.nativeEnum(TransactionType).optional(),
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+  limit: z.number().positive().max(1000).optional(),
+  offset: z.number().nonnegative().optional()
+});
+
+// Analytics Schemas
+export const metricsQuerySchema = z.object({
+  dimension: z.string(),
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+});
+
+export const reportQuerySchema = z.object({
+  type: z.nativeEnum(ReportType),
+  startDate: z.string().datetime(),
+  endDate: z.string().datetime().refine(
+    (date, ctx) => {
+      const startDate = ctx.path.includes('startDate') 
+        ? date 
+        : (ctx as any).data.startDate;
+      return new Date(date) >= new Date(startDate);
+    },
+    { message: 'End date must be after start date' }
+  ),
+});
+
+// Compliance Schemas
+export const complianceValidationSchema = z.object({
+  data: z.record(z.unknown()),
+  categories: z.array(z.nativeEnum(ComplianceCategory)),
+});
+
+export const auditLogsQuerySchema = z.object({
+  entityType: z.string().optional(),
+  entityId: z.string().optional(),
+  userId: z.string().optional(),
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+  type: z.string().optional(),
+  limit: z.number().positive().optional(),
+  offset: z.number().nonnegative().optional(),
+});
+
+// Webhook Schemas
+export const webhookEndpointSchema = z.object({
+  url: z.string().url('Valid URL is required'),
+  events: z.array(z.string()),
+  secret: z.string().optional(),
+  metadata: z.record(z.any()).optional()
+});
+
+// Payment Input Schema
+export const paymentInputSchema = z.object({
+  amount: amountSchema,
+  currency: currencySchema,
+  paymentMethodId: z.string().min(1, 'Payment method ID is required'),
+  metadata: z.record(z.any()).optional()
+});
+
 // Export validation functions
-export const validatePaymentMethod = (data: unknown) => paymentMethodValidation.parse(data);
-export const validateTransaction = (data: unknown) => transactionValidation.parse(data);
-export const validateCustomerProfile = (data: unknown) => customerProfileValidation.parse(data);
-export const validateCompliance = (data: unknown) => complianceValidation.parse(data);
-export const validateAnalyticsQuery = (data: unknown) => analyticsQueryValidation.parse(data);
-export const validateWebhook = (data: unknown) => webhookValidation.parse(data);
-export const validateCurrencyExchange = (data: unknown) => currencyExchangeValidation.parse(data);
+export const validatePaymentMethod = (data: unknown) => paymentMethodSchema.parse(data);
+export const validateTransaction = (data: unknown) => transactionSchema.parse(data);
+export const validateCustomerProfile = (data: unknown) => customerProfileSchema.parse(data);
+export const validateCompliance = (data: unknown) => complianceValidationSchema.parse(data);
+export const validateAnalyticsQuery = (data: unknown) => metricsQuerySchema.parse(data);
+export const validateWebhook = (data: unknown) => webhookEndpointSchema.parse(data);
+export const validateCurrencyExchange = (data: unknown) => currencyConversionSchema.parse(data);
 
 // Export types
-export type CustomerProfileValidation = z.infer<typeof customerProfileValidation>;
-export type PaymentMethodValidation = z.infer<typeof paymentMethodValidation>;
-export type TransactionValidation = z.infer<typeof transactionValidation>;
-export type ComplianceValidation = z.infer<typeof complianceValidation>;
-export type AnalyticsQueryValidation = z.infer<typeof analyticsQueryValidation>;
-export type WebhookValidation = z.infer<typeof webhookValidation>;
-export type CurrencyExchangeValidation = z.infer<typeof currencyExchangeValidation>;
+export type PaymentMethodSchemaType = z.infer<typeof paymentMethodSchema>;
+export type CustomerProfileSchemaType = z.infer<typeof customerProfileSchema>;
+export type TransactionSchemaType = z.infer<typeof transactionSchema>;
+export type MetricsQueryType = z.infer<typeof metricsQuerySchema>;
+export type ReportQueryType = z.infer<typeof reportQuerySchema>;
+export type ComplianceValidationType = z.infer<typeof complianceValidationSchema>;
+export type AuditLogsQueryType = z.infer<typeof auditLogsQuerySchema>;
+export type WebhookEndpointType = z.infer<typeof webhookEndpointSchema>;
+export type PaymentInputType = z.infer<typeof paymentInputSchema>;
