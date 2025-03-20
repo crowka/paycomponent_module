@@ -26,42 +26,55 @@ export class WebhookController {
    * Handle incoming Stripe webhook
    */
   handleStripeWebhook = async (req: Request, res: Response): Promise<void> => {
+   // In handleStripeWebhook method:
+try {
+  // Get Stripe signature from headers
+  const signature = req.headers['stripe-signature'] as string;
+  
+  if (!signature) {
+    this.logger.warn('Stripe webhook received without signature');
+    res.status(400).json({
+      success: false,
+      error: {
+        code: 'missing_signature',
+        message: 'Stripe signature is missing'
+      }
+    });
+    return;
+  }
+  
+  // Verify webhook signature if secret is configured
+  if (this.providerConfig.stripeWebhookSecret) {
     try {
-      // Get Stripe signature from headers
-      const signature = req.headers['stripe-signature'] as string;
+      const isValid = this.verifyStripeSignature(
+        req.body, // This should be the raw body string
+        signature,
+        this.providerConfig.stripeWebhookSecret
+      );
       
-      if (!signature) {
-        this.logger.warn('Stripe webhook received without signature');
-        res.status(400).json({
+      if (!isValid) {
+        this.logger.warn('Invalid Stripe signature');
+        res.status(401).json({
           success: false,
           error: {
-            code: 'missing_signature',
-            message: 'Stripe signature is missing'
+            code: 'invalid_signature',
+            message: 'Invalid Stripe signature'
           }
         });
         return;
       }
-      
-      // Verify webhook signature if secret is configured
-      if (this.providerConfig.stripeWebhookSecret) {
-        try {
-          this.verifyStripeSignature(
-            req.body,
-            signature,
-            this.providerConfig.stripeWebhookSecret
-          );
-        } catch (error) {
-          this.logger.warn('Invalid Stripe signature', { error });
-          res.status(401).json({
-            success: false,
-            error: {
-              code: 'invalid_signature',
-              message: 'Invalid Stripe signature'
-            }
-          });
-          return;
+    } catch (error) {
+      this.logger.warn('Invalid Stripe signature', { error });
+      res.status(401).json({
+        success: false,
+        error: {
+          code: 'invalid_signature',
+          message: 'Invalid Stripe signature'
         }
-      }
+      });
+      return;
+    }
+  }
       
       // Log webhook event
       this.logger.info('Received Stripe webhook', {
