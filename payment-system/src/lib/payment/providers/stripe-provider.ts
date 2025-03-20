@@ -1,4 +1,5 @@
-// src/lib/payment/providers/stripe-provider.ts
+// src/lib/payment/providers/stripe-provider.ts - Updated implementation
+
 import { Stripe } from 'stripe';
 import { BasePaymentProvider } from './base-provider';
 import { 
@@ -10,9 +11,11 @@ import {
 } from '../types/provider.types';
 import { PaymentLogger } from '../utils/logger';
 import { errorHandler, ErrorCode } from '../utils/error';
+import { v4 as uuidv4 } from 'uuid';
 
 export class StripeProvider extends BasePaymentProvider {
   private client: Stripe;
+  private isInitialized: boolean = false;
 
   constructor() {
     super();
@@ -20,24 +23,17 @@ export class StripeProvider extends BasePaymentProvider {
   }
 
   async initialize(config: ProviderConfig): Promise<void> {
-    this.logger.info('Initializing Stripe provider', { 
-      environment: config.environment,
-      webhookConfigured: !!config.webhookSecret
-    });
-    
-    await super.initialize(config);
-    
     if (!config.apiKey) {
-      const error = 'Stripe API key is required';
-      this.logger.error(error);
       throw errorHandler.createError(
-        error,
+        'Stripe API key is required',
         ErrorCode.CONFIGURATION_ERROR,
         { provider: 'StripeProvider' }
       );
     }
-    
+
     try {
+      await super.initialize(config);
+      
       this.client = new Stripe(config.apiKey, {
         apiVersion: '2023-10-16'
       });
@@ -48,6 +44,8 @@ export class StripeProvider extends BasePaymentProvider {
         accountId: account.id,
         environment: config.environment
       });
+      
+      this.isInitialized = true;
     } catch (error) {
       this.logger.error('Stripe initialization failed', { error });
       throw errorHandler.wrapError(
@@ -61,11 +59,8 @@ export class StripeProvider extends BasePaymentProvider {
   async createPayment(data: CreatePaymentInput): Promise<PaymentResult> {
     this.checkInitialization();
     
-    // Validate input parameters
-    this.validateCreatePaymentInput(data);
-    
-    const paymentId = Math.random().toString(36).substring(7);
-    this.logger.info(`Creating payment [${paymentId}]`, { 
+    const operationId = uuidv4().slice(0, 8);
+    this.logger.info(`[${operationId}] Creating payment`, { 
       amount: data.amount,
       currency: data.amount.currency,
       customerId: data.customer.id
@@ -74,37 +69,28 @@ export class StripeProvider extends BasePaymentProvider {
     try {
       // Convert amount to cents for Stripe
       const amount = Math.round(data.amount.amount * 100);
-      
-      // Prepare payment method
       let paymentMethodId: string;
       
+      // Handle payment method (string ID or object)
       if (typeof data.paymentMethod === 'string') {
         paymentMethodId = data.paymentMethod;
-        this.logger.info(`Using existing payment method [${paymentId}]`, { 
-          methodId: paymentMethodId 
-        });
       } else {
         // Create a payment method if object is provided
-        this.logger.info(`Creating new payment method [${paymentId}]`);
-        
         const paymentMethodResult = await this.client.paymentMethods.create({
           type: 'card',
           card: {
             number: data.paymentMethod.details.number,
-            exp_month: data.paymentMethod.details.exp_month,
-            exp_year: data.paymentMethod.details.exp_year,
+            exp_month: data.paymentMethod.details.expiryMonth || data.paymentMethod.details.exp_month,
+            exp_year: data.paymentMethod.details.expiryYear || data.paymentMethod.details.exp_year,
             cvc: data.paymentMethod.details.cvc
           }
         });
         
         paymentMethodId = paymentMethodResult.id;
-        this.logger.info(`Payment method created [${paymentId}]`, { 
-          methodId: paymentMethodId 
-        });
+        this.logger.debug(`[${operationId}] Created payment method`, { methodId: paymentMethodId });
       }
 
-      // Create a payment intent
-      this.logger.info(`Creating payment intent [${paymentId}]`);
+      // Create payment intent
       const paymentIntent = await this.client.paymentIntents.create({
         amount,
         currency: data.amount.currency.toLowerCase(),
@@ -112,39 +98,101 @@ export class StripeProvider extends BasePaymentProvider {
         confirm: true,
         metadata: {
           ...data.metadata,
-          customerId: data.customer.id
+          customerId: data.customer.id,
+          internalOperationId: operationId
         },
-        receipt_email: data.customer.email
+        receipt_email: data.customer.email,
+        // Add idempotency key if available
+        ...(data.metadata?.idempotencyKey && {
+          idempotency_key: data.metadata.idempotencyKey
+        })
       });
 
       const success = paymentIntent.status === 'succeeded';
+      
+      this.logger.info(`[${operationId}] Payment result: ${paymentIntent.status}`, {
+        status: paymentIntent.status,
+        intentId: paymentIntent.id
+      });
+      
+      // Handle different payment statuses
       if (success) {
-        this.logger.info(`Payment successful [${paymentId}]`, { 
-          transactionId: paymentIntent.id 
-        });
+        return {
+          success: true,
+          transactionId: paymentIntent.id,
+          metadata: {
+            stripeStatus: paymentIntent.status,
+            stripeChargeId: paymentIntent.latest_charge,
+            operationId
+          }
+        };
+      } else if (paymentIntent.status === 'requires_action') {
+        return {
+          success: false,
+          transactionId: paymentIntent.id,
+          metadata: {
+            stripeStatus: paymentIntent.status,
+            requiresAction: true,
+            clientSecret: paymentIntent.client_secret,
+            nextAction: paymentIntent.next_action,
+            operationId
+          },
+          error: {
+            code: 'REQUIRES_ACTION',
+            message: 'Customer action is required to complete this payment',
+            details: { nextAction: paymentIntent.next_action }
+          }
+        };
       } else {
-        this.logger.warn(`Payment not yet succeeded [${paymentId}]`, { 
-          status: paymentIntent.status,
-          transactionId: paymentIntent.id
-        });
+        return {
+          success: false,
+          transactionId: paymentIntent.id,
+          metadata: {
+            stripeStatus: paymentIntent.status,
+            operationId
+          },
+          error: {
+            code: 'PAYMENT_FAILED',
+            message: `Payment failed with status: ${paymentIntent.status}`,
+            details: { status: paymentIntent.status }
+          }
+        };
       }
-
-      return {
-        success,
-        transactionId: paymentIntent.id,
-        metadata: paymentIntent.metadata as Record<string, any>
-      };
     } catch (error) {
-      this.logger.error(`Payment creation failed [${paymentId}]`, { 
+      this.logger.error(`[${operationId}] Payment creation failed`, { 
         error,
         errorCode: error.code || 'unknown',
         message: error.message
       });
       
+      // Handle specific Stripe errors
+      if (error.type === 'StripeCardError') {
+        return {
+          success: false,
+          error: {
+            code: error.code || 'CARD_ERROR',
+            message: error.message,
+            details: error.raw || error
+          }
+        };
+      }
+      
+      if (error.type === 'StripeInvalidRequestError') {
+        return {
+          success: false,
+          error: {
+            code: error.code || 'INVALID_REQUEST',
+            message: error.message,
+            details: error.raw || error
+          }
+        };
+      }
+      
+      // Default error response
       return {
         success: false,
         error: {
-          code: error.code || 'payment_failed',
+          code: error.code || 'PAYMENT_FAILED',
           message: error.message,
           details: error.raw || error
         }
@@ -155,7 +203,6 @@ export class StripeProvider extends BasePaymentProvider {
   async confirmPayment(paymentId: string): Promise<PaymentResult> {
     this.checkInitialization();
     
-    // Validate payment ID
     if (!paymentId) {
       throw errorHandler.createError(
         'Payment ID is required',
@@ -163,42 +210,83 @@ export class StripeProvider extends BasePaymentProvider {
       );
     }
     
-    const operationId = Math.random().toString(36).substring(7);
-    this.logger.info(`Confirming payment [${operationId}]`, { paymentId });
+    const operationId = uuidv4().slice(0, 8);
+    this.logger.info(`[${operationId}] Confirming payment`, { paymentId });
 
     try {
-      const paymentIntent = await this.client.paymentIntents.confirm(paymentId);
+      const paymentIntent = await this.client.paymentIntents.retrieve(paymentId);
       
-      const success = paymentIntent.status === 'succeeded';
-      if (success) {
-        this.logger.info(`Payment confirmation successful [${operationId}]`, { 
-          paymentId, 
-          status: paymentIntent.status 
-        });
-      } else {
-        this.logger.warn(`Payment confirmation incomplete [${operationId}]`, { 
-          paymentId, 
-          status: paymentIntent.status 
-        });
+      // Only confirm if it needs confirmation
+      if (paymentIntent.status === 'requires_confirmation' || 
+          paymentIntent.status === 'requires_action' ||
+          paymentIntent.status === 'requires_payment_method') {
+        
+        await this.client.paymentIntents.confirm(paymentId);
       }
       
-      return {
-        success,
-        transactionId: paymentIntent.id,
-        metadata: paymentIntent.metadata as Record<string, any>
-      };
-    } catch (error) {
-      this.logger.error(`Payment confirmation failed [${operationId}]`, { 
+      // Get the updated payment intent
+      const updatedIntent = await this.client.paymentIntents.retrieve(paymentId);
+      const success = updatedIntent.status === 'succeeded';
+      
+      this.logger.info(`[${operationId}] Payment confirmation result: ${updatedIntent.status}`, {
         paymentId,
+        status: updatedIntent.status
+      });
+      
+      if (success) {
+        return {
+          success: true,
+          transactionId: updatedIntent.id,
+          metadata: {
+            stripeStatus: updatedIntent.status,
+            stripeChargeId: updatedIntent.latest_charge,
+            operationId
+          }
+        };
+      } else if (updatedIntent.status === 'requires_action') {
+        return {
+          success: false,
+          transactionId: updatedIntent.id,
+          metadata: {
+            stripeStatus: updatedIntent.status,
+            requiresAction: true,
+            clientSecret: updatedIntent.client_secret,
+            nextAction: updatedIntent.next_action,
+            operationId
+          },
+          error: {
+            code: 'REQUIRES_ACTION',
+            message: 'Customer action is required to complete this payment',
+            details: { nextAction: updatedIntent.next_action }
+          }
+        };
+      } else {
+        return {
+          success: false,
+          transactionId: updatedIntent.id,
+          metadata: {
+            stripeStatus: updatedIntent.status,
+            operationId
+          },
+          error: {
+            code: 'PAYMENT_FAILED',
+            message: `Payment failed with status: ${updatedIntent.status}`,
+            details: { status: updatedIntent.status }
+          }
+        };
+      }
+    } catch (error) {
+      this.logger.error(`[${operationId}] Payment confirmation failed`, { 
         error,
-        errorCode: error.code || 'unknown',
-        message: error.message
+        paymentId,
+        errorCode: error.code || 'unknown'
       });
       
       return {
         success: false,
+        transactionId: paymentId,
         error: {
-          code: error.code || 'confirmation_failed',
+          code: error.code || 'CONFIRMATION_FAILED',
           message: error.message,
           details: error.raw || error
         }
@@ -209,7 +297,6 @@ export class StripeProvider extends BasePaymentProvider {
   async getPaymentMethods(customerId: string): Promise<PaymentMethod[]> {
     this.checkInitialization();
     
-    // Validate customer ID
     if (!customerId) {
       throw errorHandler.createError(
         'Customer ID is required',
@@ -217,18 +304,38 @@ export class StripeProvider extends BasePaymentProvider {
       );
     }
     
-    const operationId = Math.random().toString(36).substring(7);
-    this.logger.info(`Fetching payment methods [${operationId}]`, { customerId });
-
     try {
+      // First check if the customer exists in Stripe
+      let stripeCustomerId: string;
+      
+      try {
+        // Try to find existing customer
+        const customers = await this.client.customers.list({
+          limit: 1,
+          email: customerId // Assuming customerId is an email or we store Stripe ID in metadata
+        });
+        
+        if (customers.data.length > 0) {
+          stripeCustomerId = customers.data[0].id;
+        } else {
+          // Create a new customer
+          const customer = await this.client.customers.create({
+            metadata: { internalId: customerId }
+          });
+          stripeCustomerId = customer.id;
+        }
+      } catch (error) {
+        this.logger.error('Error finding/creating Stripe customer', { 
+          error, 
+          customerId 
+        });
+        throw error;
+      }
+      
+      // Get payment methods
       const methods = await this.client.paymentMethods.list({
-        customer: customerId,
+        customer: stripeCustomerId,
         type: 'card'
-      });
-
-      this.logger.info(`Retrieved payment methods [${operationId}]`, { 
-        customerId,
-        count: methods.data.length
       });
 
       return methods.data.map(method => ({
@@ -244,11 +351,9 @@ export class StripeProvider extends BasePaymentProvider {
         }
       }));
     } catch (error) {
-      this.logger.error(`Error fetching payment methods [${operationId}]`, { 
-        customerId,
-        error,
-        errorCode: error.code || 'unknown',
-        message: error.message
+      this.logger.error('Error fetching payment methods', { 
+        error, 
+        customerId 
       });
       
       throw errorHandler.wrapError(
@@ -266,7 +371,6 @@ export class StripeProvider extends BasePaymentProvider {
   ): Promise<PaymentMethod> {
     this.checkInitialization();
     
-    // Validate customer ID
     if (!customerId) {
       throw errorHandler.createError(
         'Customer ID is required',
@@ -274,19 +378,35 @@ export class StripeProvider extends BasePaymentProvider {
       );
     }
     
-    // Validate payment method data
-    this.validateAddPaymentMethodInput(data);
-    
-    const operationId = Math.random().toString(36).substring(7);
-    this.logger.info(`Adding payment method [${operationId}]`, { 
-      customerId, 
-      type: data.type,
-      setAsDefault: data.setAsDefault
-    });
-
     try {
+      // First check if the customer exists in Stripe
+      let stripeCustomerId: string;
+      
+      try {
+        // Try to find existing customer
+        const customers = await this.client.customers.list({
+          limit: 1,
+          email: customerId // Assuming customerId is an email or we store Stripe ID in metadata
+        });
+        
+        if (customers.data.length > 0) {
+          stripeCustomerId = customers.data[0].id;
+        } else {
+          // Create a new customer
+          const customer = await this.client.customers.create({
+            metadata: { internalId: customerId }
+          });
+          stripeCustomerId = customer.id;
+        }
+      } catch (error) {
+        this.logger.error('Error finding/creating Stripe customer', { 
+          error, 
+          customerId 
+        });
+        throw error;
+      }
+      
       // Create payment method
-      this.logger.debug(`Creating payment method [${operationId}]`);
       const paymentMethod = await this.client.paymentMethods.create({
         type: 'card',
         card: {
@@ -296,58 +416,41 @@ export class StripeProvider extends BasePaymentProvider {
           cvc: data.details.cvc
         },
         metadata: { 
-          default: data.setAsDefault ? 'true' : 'false' 
+          default: data.setAsDefault ? 'true' : 'false',
+          internalCustomerId: customerId
         }
       });
-
+      
       // Attach to customer
-      this.logger.debug(`Attaching payment method to customer [${operationId}]`, {
-        methodId: paymentMethod.id,
-        customerId
+      await this.client.paymentMethods.attach(paymentMethod.id, {
+        customer: stripeCustomerId
       });
       
-      await this.client.paymentMethods.attach(paymentMethod.id, {
-        customer: customerId
-      });
-
       // Set as default if requested
       if (data.setAsDefault) {
-        this.logger.debug(`Setting as default payment method [${operationId}]`, {
-          methodId: paymentMethod.id,
-          customerId
-        });
-        
-        await this.client.customers.update(customerId, {
+        await this.client.customers.update(stripeCustomerId, {
           invoice_settings: {
             default_payment_method: paymentMethod.id
           }
         });
       }
-
-      this.logger.info(`Payment method added successfully [${operationId}]`, {
-        methodId: paymentMethod.id,
-        customerId,
-        isDefault: data.setAsDefault
-      });
-
+      
       return {
         id: paymentMethod.id,
         type: 'card',
         isDefault: data.setAsDefault || false,
         customerId,
         details: {
-          brand: paymentMethod.card?.brand,
-          last4: paymentMethod.card?.last4,
-          expiryMonth: paymentMethod.card?.exp_month,
-          expiryYear: paymentMethod.card?.exp_year
+          brand: paymentMethod.card.brand,
+          last4: paymentMethod.card.last4,
+          expiryMonth: paymentMethod.card.exp_month,
+          expiryYear: paymentMethod.card.exp_year
         }
       };
     } catch (error) {
-      this.logger.error(`Error adding payment method [${operationId}]`, { 
-        customerId,
-        error,
-        errorCode: error.code || 'unknown',
-        message: error.message
+      this.logger.error('Error adding payment method', { 
+        error, 
+        customerId 
       });
       
       throw errorHandler.wrapError(
@@ -362,7 +465,6 @@ export class StripeProvider extends BasePaymentProvider {
   async removePaymentMethod(methodId: string): Promise<void> {
     this.checkInitialization();
     
-    // Validate method ID
     if (!methodId) {
       throw errorHandler.createError(
         'Payment method ID is required',
@@ -370,18 +472,12 @@ export class StripeProvider extends BasePaymentProvider {
       );
     }
     
-    const operationId = Math.random().toString(36).substring(7);
-    this.logger.info(`Removing payment method [${operationId}]`, { methodId });
-    
     try {
       await this.client.paymentMethods.detach(methodId);
-      this.logger.info(`Payment method removed successfully [${operationId}]`, { methodId });
     } catch (error) {
-      this.logger.error(`Error removing payment method [${operationId}]`, { 
-        methodId,
-        error,
-        errorCode: error.code || 'unknown',
-        message: error.message
+      this.logger.error('Error removing payment method', { 
+        error, 
+        methodId 
       });
       
       throw errorHandler.wrapError(
@@ -396,7 +492,6 @@ export class StripeProvider extends BasePaymentProvider {
   async verifyWebhookSignature(payload: string, signature: string): Promise<boolean> {
     this.checkInitialization();
     
-    // Validate webhook parameters
     if (!payload) {
       throw errorHandler.createError(
         'Webhook payload is required',
@@ -411,14 +506,9 @@ export class StripeProvider extends BasePaymentProvider {
       );
     }
     
-    const operationId = Math.random().toString(36).substring(7);
-    this.logger.info(`Verifying webhook signature [${operationId}]`, {
-      signatureLength: signature?.length
-    });
-    
     try {
       if (!this.config.webhookSecret) {
-        this.logger.warn(`Webhook secret not configured [${operationId}]`);
+        this.logger.warn('Webhook secret not configured');
         return false;
       }
       
@@ -428,17 +518,23 @@ export class StripeProvider extends BasePaymentProvider {
         this.config.webhookSecret
       );
       
-      this.logger.info(`Webhook signature verified [${operationId}]`, {
-        eventType: event.type,
+      this.logger.info(`Webhook signature verified for event ${event.type}`, {
         eventId: event.id
       });
       
       return true;
     } catch (error) {
-      this.logger.error(`Webhook signature verification failed [${operationId}]`, { 
-        error: error.message
-      });
+      this.logger.error('Webhook signature verification failed', { error });
       return false;
+    }
+  }
+
+  private checkInitialization(): void {
+    if (!this.isInitialized) {
+      throw errorHandler.createError(
+        'Stripe provider not initialized',
+        ErrorCode.PROVIDER_NOT_INITIALIZED
+      );
     }
   }
 }
