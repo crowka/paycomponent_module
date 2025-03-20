@@ -1,8 +1,22 @@
 // src/lib/payment/types/common.types.ts
 
-import { Transaction, TransactionType, TransactionStatus, TransactionError } from './transaction.types';
-export { Transaction, TransactionType, TransactionStatus, TransactionError };
+// Import from the central transaction types file
+import { 
+  Transaction, 
+  TransactionType, 
+  TransactionStatus, 
+  TransactionError 
+} from './transaction.types';
 
+// Re-export transaction types from central file
+export { 
+  Transaction, 
+  TransactionType, 
+  TransactionStatus, 
+  TransactionError 
+};
+
+// Define other common types that aren't transaction-specific
 export interface PaymentAmount {
   amount: number;
   currency: string;
@@ -35,6 +49,3 @@ export interface PaymentError {
   message: string;
   details?: Record<string, any>;
 }
-
-
-
