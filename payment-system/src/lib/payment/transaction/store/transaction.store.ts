@@ -1,4 +1,4 @@
-/ src/lib/payment/transaction/store/transaction.store.ts
+// src/lib/payment/transaction/store/transaction.store.ts
 
 import { Transaction, TransactionStatus, TransactionType } from '../types';
 
@@ -23,7 +23,7 @@ export abstract class TransactionStore {
   abstract findByIdempotencyKey(key: string): Promise<Transaction | null>;
 }
 
-// src/lib/payment/transaction/store/memory.store.ts
+// Consolidated implementation of InMemoryTransactionStore
 export class InMemoryTransactionStore extends TransactionStore {
   private transactions: Map<string, Transaction> = new Map();
   private idempotencyKeys: Map<string, string> = new Map();
@@ -60,6 +60,7 @@ export class InMemoryTransactionStore extends TransactionStore {
       results = results.filter(tx => tx.createdAt <= options.endDate!);
     }
 
+    // Sort results by creation date, newest first
     results.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 
     const start = options.offset || 0;
