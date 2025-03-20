@@ -32,6 +32,7 @@ export class RecoveryManager {
     private store: TransactionStore,
     private deadLetterQueue: DeadLetterQueue,
     private strategies: RecoveryStrategy[],
+    private retryManager: any, // Added retryManager
     options: RecoveryOptions = {}
   ) {
     this.logger = new PaymentLogger(options.logLevel || 'info', 'RecoveryManager');
@@ -59,6 +60,17 @@ export class RecoveryManager {
         errorCode: error.code,
         recoverable: error.recoverable
       });
+
+      // Add proper coordination with retry system
+      if (error.retryable && transaction.retryCount < this.maxAttempts) {
+        // Use retry manager instead of direct recovery
+        return this.retryManager.scheduleRetry(transaction);
+      }
+      
+      // Only proceed with recovery for recoverable errors
+      if (!error.recoverable) {
+        return this.moveToDeadLetter(transaction, error, operationId);
+      }
 
       // Validate transaction can be recovered
       this.validateTransaction(transaction);
@@ -127,24 +139,29 @@ export class RecoveryManager {
           );
         }
       } catch (recoveryError) {
-        this.logger.error(`[${operationId}] Error executing recovery strategy`, {
-          error: recoveryError,
-          transactionId: transaction.id
-        });
-
-        // Wrap the error and move to dead letter queue
-        const wrappedError = {
+        // Add detailed error context
+        const enhancedError = {
           code: 'RECOVERY_EXECUTION_ERROR',
           message: recoveryError.message || 'Error executing recovery strategy',
           recoverable: false,
-          retryable: false,
+          retryable: transaction.retryCount < this.maxAttempts - 1,
           details: { 
             originalErrorCode: error.code,
-            recoveryStrategyType: strategy.type
+            strategyType: strategy.type,
+            transactionId: transaction.id,
+            attemptCount: transaction.retryCount
           }
         };
-
-        return this.moveToDeadLetter(updatedTransaction, wrappedError, operationId);
+        
+        // Log with additional context
+        this.logger.error(`Recovery strategy execution failed`, {
+          error: recoveryError,
+          transactionId: transaction.id,
+          strategy: strategy.type,
+          enhancedError
+        });
+        
+        return this.moveToDeadLetter(updatedTransaction, enhancedError, operationId);
       }
     } catch (error) {
       this.logger.error(`Failed to initiate recovery for transaction ${transaction.id}`, { error });
