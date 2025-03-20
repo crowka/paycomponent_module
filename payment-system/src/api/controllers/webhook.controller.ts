@@ -7,7 +7,6 @@ import { TransactionStatus } from '../../lib/payment/types/transaction.types';
 import { PaymentLogger } from '../../lib/payment/utils/logger';
 import { errorHandler } from '../../lib/payment/utils/error';
 import crypto from 'crypto';
-import crypto from 'crypto';
 
 export class WebhookController {
   private logger: PaymentLogger;
@@ -345,37 +344,49 @@ export class WebhookController {
    * Verify Stripe webhook signature
    */
   private verifyStripeSignature(
-    payload: any,
+    payload: string,
     signature: string,
     secret: string
-  ): void {
-    const payloadString = JSON.stringify(payload);
-    const timestampStr = signature.split(',')[0].split('=')[1];
-    const timestamp = parseInt(timestampStr);
-    
-    if (isNaN(timestamp)) {
-      throw new Error('Invalid Stripe signature timestamp');
-    }
-    
-    // Check if webhook is too old (5 minutes)
-    const now = Math.floor(Date.now() / 1000);
-    if (now - timestamp > 300) {
-      throw new Error('Stripe signature timestamp too old');
-    }
-    
-    // Compute signature
-    const signedPayload = `${timestamp}.${payloadString}`;
-    const expectedSignature = crypto
-      .createHmac('sha256', secret)
-      .update(signedPayload)
-      .digest('hex');
-    
-    // Get actual signature from header
-    const actualSignature = signature.split(',')[1].split('=')[1];
-    
-    // Compare signatures
-    if (expectedSignature !== actualSignature) {
-      throw new Error('Stripe signature verification failed');
+  ): boolean {
+    try {
+      // Parse signature components
+      const signatureParts = signature.split(',');
+      if (signatureParts.length < 2) {
+        throw new Error('Invalid signature format');
+      }
+      
+      // Extract timestamp and signature values
+      const timestampPart = signatureParts.find(part => part.startsWith('t='));
+      const signaturePart = signatureParts.find(part => part.startsWith('v1='));
+      
+      if (!timestampPart || !signaturePart) {
+        throw new Error('Missing timestamp or signature components');
+      }
+      
+      const timestamp = timestampPart.substring(2);
+      const signatureValue = signaturePart.substring(3);
+      
+      // Check if webhook is too old (5 minutes)
+      const now = Math.floor(Date.now() / 1000);
+      if (now - parseInt(timestamp) > 300) {
+        throw new Error('Webhook timestamp too old');
+      }
+      
+      // Compute expected signature
+      const signedPayload = `${timestamp}.${payload}`;
+      const expectedSignature = crypto
+        .createHmac('sha256', secret)
+        .update(signedPayload)
+        .digest('hex');
+      
+      // Compare signatures using constant-time comparison
+      return crypto.timingSafeEqual(
+        Buffer.from(expectedSignature),
+        Buffer.from(signatureValue)
+      );
+    } catch (error) {
+      this.logger.error('Signature verification failed', { error });
+      return false;
     }
   }
   
@@ -655,6 +666,20 @@ export class WebhookController {
   /**
    * Check if a Stripe error code is retryable
    */
+  private isRetryableStripeError(errorCode: string): boolean {
+    // List of Stripe error codes that are considered retryable
+    const retryableErrors = [
+      'card_declined',
+      'processing_error',
+      'rate_limit',
+      'resource_missing',
+      'insufficient_funds',
+      'authentication_required'
+    ];
+    
+    return retryableErrors.includes(errorCode);
+  }
+  
   /**
    * Validate a URL
    */
@@ -666,5 +691,4 @@ export class WebhookController {
       return false;
     }
   }
-}
 }
