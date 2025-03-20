@@ -25,35 +25,45 @@ export class WebhookController {
   /**
    * Handle incoming Stripe webhook
    */
-  handleStripeWebhook = async (req: Request, res: Response): Promise<void> => {
-   // In handleStripeWebhook method:
-try {
-  // Get Stripe signature from headers
-  const signature = req.headers['stripe-signature'] as string;
-  
-  if (!signature) {
-    this.logger.warn('Stripe webhook received without signature');
-    res.status(400).json({
-      success: false,
-      error: {
-        code: 'missing_signature',
-        message: 'Stripe signature is missing'
-      }
-    });
-    return;
-  }
-  
-  // Verify webhook signature if secret is configured
-  if (this.providerConfig.stripeWebhookSecret) {
-    try {
-      const isValid = this.verifyStripeSignature(
-        req.body, // This should be the raw body string
-        signature,
-        this.providerConfig.stripeWebhookSecret
-      );
-      
-      if (!isValid) {
-        this.logger.warn('Invalid Stripe signature');
+handleStripeWebhook = async (req: Request, res: Response): Promise<void> => {
+  try {
+    // Get Stripe signature from headers
+    const signature = req.headers['stripe-signature'] as string;
+    
+    if (!signature) {
+      this.logger.warn('Stripe webhook received without signature');
+      res.status(400).json({
+        success: false,
+        error: {
+          code: 'missing_signature',
+          message: 'Stripe signature is missing'
+        }
+      });
+      return;
+    }
+    
+    // Verify webhook signature if secret is configured
+    if (this.providerConfig.stripeWebhookSecret) {
+      try {
+        const isValid = this.verifyStripeSignature(
+          req.body, // This should be the raw body string
+          signature,
+          this.providerConfig.stripeWebhookSecret
+        );
+        
+        if (!isValid) {
+          this.logger.warn('Invalid Stripe signature');
+          res.status(401).json({
+            success: false,
+            error: {
+              code: 'invalid_signature',
+              message: 'Invalid Stripe signature'
+            }
+          });
+          return;
+        }
+      } catch (error) {
+        this.logger.warn('Invalid Stripe signature', { error });
         res.status(401).json({
           success: false,
           error: {
@@ -63,18 +73,8 @@ try {
         });
         return;
       }
-    } catch (error) {
-      this.logger.warn('Invalid Stripe signature', { error });
-      res.status(401).json({
-        success: false,
-        error: {
-          code: 'invalid_signature',
-          message: 'Invalid Stripe signature'
-        }
-      });
-      return;
     }
-  }
+    
       
       // Log webhook event
       this.logger.info('Received Stripe webhook', {
@@ -356,52 +356,52 @@ try {
   /**
    * Verify Stripe webhook signature
    */
-  private verifyStripeSignature(
-    payload: string,
-    signature: string,
-    secret: string
-  ): boolean {
-    try {
-      // Parse signature components
-      const signatureParts = signature.split(',');
-      if (signatureParts.length < 2) {
-        throw new Error('Invalid signature format');
-      }
-      
-      // Extract timestamp and signature values
-      const timestampPart = signatureParts.find(part => part.startsWith('t='));
-      const signaturePart = signatureParts.find(part => part.startsWith('v1='));
-      
-      if (!timestampPart || !signaturePart) {
-        throw new Error('Missing timestamp or signature components');
-      }
-      
-      const timestamp = timestampPart.substring(2);
-      const signatureValue = signaturePart.substring(3);
-      
-      // Check if webhook is too old (5 minutes)
-      const now = Math.floor(Date.now() / 1000);
-      if (now - parseInt(timestamp) > 300) {
-        throw new Error('Webhook timestamp too old');
-      }
-      
-      // Compute expected signature
-      const signedPayload = `${timestamp}.${payload}`;
-      const expectedSignature = crypto
-        .createHmac('sha256', secret)
-        .update(signedPayload)
-        .digest('hex');
-      
-      // Compare signatures using constant-time comparison
-      return crypto.timingSafeEqual(
-        Buffer.from(expectedSignature),
-        Buffer.from(signatureValue)
-      );
-    } catch (error) {
-      this.logger.error('Signature verification failed', { error });
-      return false;
+ private verifyStripeSignature(
+  payload: string,
+  signature: string,
+  secret: string
+): boolean {
+  try {
+    // Parse signature components
+    const signatureParts = signature.split(',');
+    if (signatureParts.length < 2) {
+      throw new Error('Invalid signature format');
     }
+    
+    // Extract timestamp and signature values
+    const timestampPart = signatureParts.find(part => part.startsWith('t='));
+    const signaturePart = signatureParts.find(part => part.startsWith('v1='));
+    
+    if (!timestampPart || !signaturePart) {
+      throw new Error('Missing timestamp or signature components');
+    }
+    
+    const timestamp = timestampPart.substring(2);
+    const signatureValue = signaturePart.substring(3);
+    
+    // Check if webhook is too old (5 minutes)
+    const now = Math.floor(Date.now() / 1000);
+    if (now - parseInt(timestamp) > 300) {
+      throw new Error('Webhook timestamp too old');
+    }
+    
+    // Compute expected signature
+    const signedPayload = `${timestamp}.${payload}`;
+    const expectedSignature = crypto
+      .createHmac('sha256', secret)
+      .update(signedPayload)
+      .digest('hex');
+    
+    // Compare signatures using constant-time comparison
+    return crypto.timingSafeEqual(
+      Buffer.from(expectedSignature),
+      Buffer.from(signatureValue)
+    );
+  } catch (error) {
+    this.logger.error('Signature verification failed', { error });
+    return false;
   }
+}
   
   /**
    * Handle payment intent succeeded event
