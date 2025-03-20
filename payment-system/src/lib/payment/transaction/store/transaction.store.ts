@@ -1,6 +1,6 @@
 // src/lib/payment/transaction/store/transaction.store.ts
 
-import { Transaction, TransactionStatus, TransactionType } from '../types';
+import { Transaction, TransactionStatus, TransactionType } from '../../types/transaction.types';
 
 export interface TransactionQuery {
   customerId?: string;
@@ -21,6 +21,9 @@ export abstract class TransactionStore {
   ): Promise<Transaction[]>;
   abstract delete(id: string): Promise<void>;
   abstract findByIdempotencyKey(key: string): Promise<Transaction | null>;
+  
+  // Optional method for reconciliation, can be implemented by concrete classes
+  queryAll?(options: TransactionQuery): Promise<Transaction[]>;
 }
 
 // Consolidated implementation of InMemoryTransactionStore
@@ -81,6 +84,35 @@ export class InMemoryTransactionStore extends TransactionStore {
     const transactionId = this.idempotencyKeys.get(key);
     if (!transactionId) return null;
     return this.get(transactionId);
+  }
+
+  // Implement queryAll for reconciliation
+  async queryAll(options: TransactionQuery): Promise<Transaction[]> {
+    let results = Array.from(this.transactions.values());
+
+    if (options.status) {
+      results = results.filter(tx => tx.status === options.status);
+    }
+
+    if (options.type) {
+      results = results.filter(tx => tx.type === options.type);
+    }
+
+    if (options.startDate) {
+      results = results.filter(tx => tx.createdAt >= options.startDate!);
+    }
+
+    if (options.endDate) {
+      results = results.filter(tx => tx.createdAt <= options.endDate!);
+    }
+
+    // Sort results by creation date, newest first
+    results.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+    const start = options.offset || 0;
+    const end = options.limit ? start + options.limit : undefined;
+
+    return results.slice(start, end).map(tx => ({ ...tx }));
   }
 
   // Helper method for testing
