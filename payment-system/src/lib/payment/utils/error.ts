@@ -35,7 +35,11 @@ export enum ErrorCode {
   
   // Idempotency errors
   IDEMPOTENCY_ERROR = 'idempotency_error',
-  DUPLICATE_REQUEST = 'duplicate_request'
+  DUPLICATE_REQUEST = 'duplicate_request',
+  
+  // Recovery errors
+  RECOVERY_ERROR = 'recovery_error',
+  RECOVERY_LIMIT_EXCEEDED = 'recovery_limit_exceeded'
 }
 
 export interface ErrorContext {
@@ -49,6 +53,7 @@ export interface ErrorResponse {
     message: string;
     code?: string;
     details?: Record<string, any>;
+    requestId?: string;
   };
 }
 
@@ -57,13 +62,15 @@ export class PaymentError extends Error {
   context?: ErrorContext;
   originalError?: Error;
   isOperational: boolean;
+  httpStatus: number;
 
   constructor(
     message: string,
     code: ErrorCode = ErrorCode.INTERNAL_ERROR,
     context?: ErrorContext,
     originalError?: Error,
-    isOperational: boolean = true
+    isOperational: boolean = true,
+    httpStatus?: number
   ) {
     super(message);
     this.name = 'PaymentError';
@@ -71,10 +78,49 @@ export class PaymentError extends Error {
     this.context = context;
     this.originalError = originalError;
     this.isOperational = isOperational;
+    this.httpStatus = httpStatus || this.determineHttpStatus(code);
     
     // Capture stack trace
     if (Error.captureStackTrace) {
       Error.captureStackTrace(this, this.constructor);
+    }
+  }
+
+  // Convert to API response format
+  toResponse(): { error: { code: string; message: string; requestId?: string }; success: false } {
+    return {
+      error: {
+        code: this.code,
+        message: this.message,
+        requestId: this.context?.requestId
+      },
+      success: false
+    };
+  }
+
+  // Determine HTTP status code based on error code
+  private determineHttpStatus(code: ErrorCode): number {
+    switch (code) {
+      case ErrorCode.VALIDATION_ERROR:
+      case ErrorCode.PAYMENT_VALIDATION_FAILED:
+      case ErrorCode.PAYMENT_METHOD_INVALID:
+        return 400;
+      case ErrorCode.AUTHENTICATION_ERROR:
+        return 401;
+      case ErrorCode.AUTHORIZATION_ERROR:
+        return 403;
+      case ErrorCode.TRANSACTION_NOT_FOUND:
+      case ErrorCode.CUSTOMER_NOT_FOUND:
+        return 404;
+      case ErrorCode.DUPLICATE_REQUEST:
+      case ErrorCode.IDEMPOTENCY_ERROR:
+      case ErrorCode.TRANSACTION_ALREADY_PROCESSED:
+        return 409;
+      case ErrorCode.PROVIDER_ERROR:
+      case ErrorCode.PROVIDER_COMMUNICATION_ERROR:
+        return 502;
+      default:
+        return 500;
     }
   }
 }
@@ -113,16 +159,26 @@ export class ErrorHandler {
   }
 
   wrapError(
-    originalError: Error,
+    originalError: Error | any,
     message: string,
     code: ErrorCode = ErrorCode.INTERNAL_ERROR,
     context?: ErrorContext,
     isOperational: boolean = true
   ): PaymentError {
+    // Preserve original error details in context
+    const enhancedContext = {
+      ...context,
+      originalError: {
+        message: originalError.message,
+        code: originalError.code,
+        stack: process.env.NODE_ENV !== 'production' ? originalError.stack : undefined
+      }
+    };
+
     return new PaymentError(
       message || originalError.message,
       code,
-      context,
+      enhancedContext,
       originalError,
       isOperational
     );
@@ -140,39 +196,13 @@ export class ErrorHandler {
 
     // Handle payment errors
     if (error instanceof PaymentError) {
-      switch (error.code) {
-        case ErrorCode.VALIDATION_ERROR:
-        case ErrorCode.PAYMENT_VALIDATION_FAILED:
-        case ErrorCode.PAYMENT_METHOD_INVALID:
-          response.statusCode = 400;
-          break;
-        case ErrorCode.AUTHENTICATION_ERROR:
-          response.statusCode = 401;
-          break;
-        case ErrorCode.AUTHORIZATION_ERROR:
-          response.statusCode = 403;
-          break;
-        case ErrorCode.TRANSACTION_NOT_FOUND:
-        case ErrorCode.CUSTOMER_NOT_FOUND:
-          response.statusCode = 404;
-          break;
-        case ErrorCode.DUPLICATE_REQUEST:
-        case ErrorCode.IDEMPOTENCY_ERROR:
-          response.statusCode = 409;
-          break;
-        case ErrorCode.PROVIDER_ERROR:
-        case ErrorCode.PROVIDER_COMMUNICATION_ERROR:
-          response.statusCode = 502;
-          break;
-        default:
-          response.statusCode = 500;
-      }
-
+      response.statusCode = error.httpStatus;
       response.body = {
         error: error.code,
         message: error.message,
         code: error.code,
-        details: error.context
+        details: error.context,
+        requestId: error.context?.requestId
       };
     } else if (error.name === 'ZodError') {
       // Handle validation errors
@@ -186,6 +216,11 @@ export class ErrorHandler {
     } else {
       // Handle generic errors
       console.error('Unhandled error in controller:', error);
+      
+      // Add request ID if available from context
+      if (error.context?.requestId) {
+        response.body.requestId = error.context.requestId;
+      }
     }
 
     return response;
@@ -217,6 +252,91 @@ export class ErrorHandler {
     // In a production environment, this could trigger alerts or emergency procedures
     // For now, we're just logging the error
   }
+  
+  /**
+   * Categorizes an error for metrics and monitoring
+   */
+  categorizeError(error: Error | PaymentError): string {
+    if (error instanceof PaymentError) {
+      // Return the error code as the category
+      return error.code;
+    }
+    
+    // For non-payment errors, categorize by error name
+    return error.name || 'UnknownError';
+  }
+  
+  /**
+   * Determines if an error is retryable
+   */
+  isRetryableError(error: Error | PaymentError): boolean {
+    if (error instanceof PaymentError) {
+      // Provider communication errors are typically retryable
+      if (error.code === ErrorCode.PROVIDER_COMMUNICATION_ERROR) {
+        return true;
+      }
+      
+      // Check if explicitly marked as retryable in context
+      return !!error.context?.retryable;
+    }
+    
+    // Network errors are typically retryable
+    if (error.name === 'NetworkError' || error.name === 'TimeoutError') {
+      return true;
+    }
+    
+    return false;
+  }
 }
 
 export const errorHandler = ErrorHandler.getInstance();
+
+/**
+ * Helper function to safely extract error message from any error type
+ */
+export function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  
+  if (typeof error === 'string') {
+    return error;
+  }
+  
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    return String(error.message);
+  }
+  
+  return 'Unknown error';
+}
+
+/**
+ * Helper function to create a standardized error response for API endpoints
+ */
+export function createErrorResponse(
+  error: Error | PaymentError | unknown,
+  requestId?: string
+): ErrorResponse {
+  if (error instanceof PaymentError) {
+    return {
+      statusCode: error.httpStatus,
+      body: {
+        error: error.code,
+        message: error.message,
+        code: error.code,
+        details: error.context,
+        requestId: requestId || error.context?.requestId
+      }
+    };
+  }
+  
+  // Default error response for non-PaymentError types
+  return {
+    statusCode: 500,
+    body: {
+      error: 'internal_error',
+      message: getErrorMessage(error),
+      requestId
+    }
+  };
+}
