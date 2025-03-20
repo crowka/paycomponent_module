@@ -36,21 +36,5 @@ export interface PaymentError {
   details?: Record<string, any>;
 }
 
-export interface Transaction {
-  id: string;
-  type: TransactionType;
-  status: TransactionStatus;
-  amount: number;
-  currency: string;
-  customerId: string;
-  paymentMethodId: string;
-  idempotencyKey: string;
-  metadata?: Record<string, any>;
-  createdAt: Date;
-  updatedAt: Date;
-  completedAt?: Date;
-  failedAt?: Date;
-  retryCount: number;
-  error?: TransactionError;
-}
+
 
