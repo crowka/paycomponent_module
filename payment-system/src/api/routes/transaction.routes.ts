@@ -1,74 +1,88 @@
 // src/api/routes/transaction.routes.ts
-import { Router } from 'express';
+
+import express from 'express';
 import { TransactionController } from '../controllers/transaction.controller';
-import { idempotencyMiddleware } from '../middleware/idempotency.middleware';
-import { authMiddleware } from '../middleware/auth.middleware';
-import { validateTransactionMiddleware } from '../middleware/validation.middleware';
+import { authenticateJWT } from '../middleware/auth.middleware';
+import { validateRequest } from '../middleware/validation.middleware';
+import { TransactionManager } from '../../lib/payment/transaction/managers/transaction.manager';
+import { RetryManager } from '../../lib/payment/transaction/managers/retry.manager';
+import { DatabaseTransactionStore } from '../../lib/payment/transaction/store/database-transaction.store';
+import { RetryQueue } from '../../lib/payment/recovery/queue/retry.queue';
+import { EventEmitter } from '../../lib/payment/events/event.emitter';
+import { RecordLocker } from '../../lib/payment/utils/record-locker';
+import { container } from '../../lib/payment/container';
 
-const router = Router();
-const controller = new TransactionController();
+// Get dependencies from container
+const transactionStore = container.resolve<DatabaseTransactionStore>('transactionStore');
+const eventEmitter = container.resolve<EventEmitter>('eventEmitter');
+const recordLocker = container.resolve<RecordLocker>('recordLocker');
+const retryQueue = container.resolve<RetryQueue>('retryQueue');
 
-// Transaction management routes
+// Create retry manager
+const retryManager = new RetryManager(transactionStore, retryQueue, {
+  eventEmitter,
+  recordLocker
+});
+
+// Create transaction manager
+const transactionManager = new TransactionManager(transactionStore, {
+  eventEmitter,
+  retryManager,
+  recordLocker
+});
+
+// Create controller
+const transactionController = new TransactionController(
+  transactionManager,
+  retryManager
+);
+
+// Create router
+const router = express.Router();
+
+// Define routes
 router.post(
-  '/transactions',
-  authMiddleware,
-  idempotencyMiddleware,
-  validateTransactionMiddleware,
-  controller.createTransaction
+  '/',
+  authenticateJWT,
+  validateRequest('transaction'),
+  transactionController.createTransaction
 );
 
 router.get(
-  '/transactions/:id',
-  authMiddleware,
-  controller.getTransaction
+  '/:id',
+  authenticateJWT,
+  transactionController.getTransaction
 );
 
 router.get(
-  '/transactions',
-  authMiddleware,
-  controller.listTransactions
+  '/customer/:customerId',
+  authenticateJWT,
+  transactionController.getTransactions
+);
+
+router.patch(
+  '/:id/status',
+  authenticateJWT,
+  validateRequest('transactionStatus'),
+  transactionController.updateTransactionStatus
 );
 
 router.post(
-  '/transactions/:id/retry',
-  authMiddleware,
-  controller.retryTransaction
+  '/:id/retry',
+  authenticateJWT,
+  transactionController.retryTransaction
 );
 
-router.post(
-  '/transactions/:id/recover',
-  authMiddleware,
-  controller.recoverTransaction
-);
-
-router.post(
-  '/transactions/:id/rollback',
-  authMiddleware,
-  controller.rollbackTransaction
-);
-
-// Monitoring routes
-router.get(
-  '/health',
-  controller.getHealthStatus
+router.delete(
+  '/:id/retry',
+  authenticateJWT,
+  transactionController.cancelRetry
 );
 
 router.get(
-  '/metrics',
-  authMiddleware,
-  controller.getMetrics
-);
-
-router.get(
-  '/alerts',
-  authMiddleware,
-  controller.getAlerts
-);
-
-router.post(
-  '/alerts/:id/acknowledge',
-  authMiddleware,
-  controller.acknowledgeAlert
+  '/stats/retry',
+  authenticateJWT,
+  transactionController.getRetryStats
 );
 
 export default router;
