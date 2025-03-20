@@ -1,428 +1,216 @@
 // src/lib/payment/transaction/managers/transaction.manager.ts
+
 import { v4 as uuidv4 } from 'uuid';
 import { 
-  Transaction,
-  TransactionStatus,
+  Transaction, 
+  TransactionStatus, 
   TransactionType,
-  TransactionError,
-  TransactionFailedError
-} from '../types';
+  TransactionError
+} from '../../types/transaction.types';
 import { TransactionStore } from '../store/transaction.store';
-import { IdempotencyManager } from '../utils/idempotency';
-import { RetryManager } from './retry.manager';
-import { RecoveryManager } from './recovery.manager';
 import { PaymentLogger } from '../../utils/logger';
-import { errorHandler, ErrorCode } from '../../utils/error';
 import { EventEmitter } from '../../events/event.emitter';
+import { errorHandler, ErrorCode } from '../../utils/error';
+import { RecordLocker, LockLevel } from '../../utils/record-locker';
+import { RecoveryManager } from './recovery.manager';
+import { RetryManager } from './retry.manager';
 
-// Distributed lock record structure
-interface TransactionLock {
-  transactionId: string;
-  acquiredAt: Date;
-  expiresAt: Date;
-  owner: string;
-  renewed?: Date;
+/**
+ * Options for TransactionManager
+ */
+export interface TransactionManagerOptions {
+  eventEmitter?: EventEmitter;
+  recoveryManager?: RecoveryManager;
+  retryManager?: RetryManager;
+  recordLocker?: RecordLocker;
+  logLevel?: 'debug' | 'info' | 'warn' | 'error';
 }
 
+/**
+ * Manages transaction lifecycle, persistence, and coordination with
+ * recovery and retry functionality.
+ */
 export class TransactionManager {
   private logger: PaymentLogger;
-  private locks: Map<string, TransactionLock> = new Map();
-  private lockExpirationMs: number = 30000; // 30 seconds
-  private lockRenewalIntervalMs: number = 10000; // 10 seconds
-  private instanceId: string = uuidv4(); // Unique ID for this instance
-  private renewalTimers: Map<string, NodeJS.Timeout> = new Map();
   private eventEmitter?: EventEmitter;
-
+  private recoveryManager?: RecoveryManager;
+  private retryManager?: RetryManager;
+  private recordLocker?: RecordLocker;
+  private lockTimeoutMs: number = 10000; // 10 seconds
+  
   constructor(
     private store: TransactionStore,
-    private idempotencyManager: IdempotencyManager,
-    private retryManager: RetryManager,
-    private recoveryManager: RecoveryManager,
-    options: {
-      eventEmitter?: EventEmitter;
-      lockExpirationMs?: number;
-      lockRenewalIntervalMs?: number;
-    } = {}
+    options: TransactionManagerOptions = {}
   ) {
-    this.logger = new PaymentLogger('info', 'TransactionManager');
-    this.lockExpirationMs = options.lockExpirationMs || this.lockExpirationMs;
-    this.lockRenewalIntervalMs = options.lockRenewalIntervalMs || this.lockRenewalIntervalMs;
+    this.logger = new PaymentLogger(options.logLevel || 'info', 'TransactionManager');
     this.eventEmitter = options.eventEmitter;
+    this.recoveryManager = options.recoveryManager;
+    this.retryManager = options.retryManager;
+    this.recordLocker = options.recordLocker;
   }
 
+  /**
+   * Begin a new transaction
+   * @param type Type of transaction
+   * @param data Transaction data
+   * @returns New transaction
+   */
   async beginTransaction(
     type: TransactionType,
-    data: {
-      amount: number;
-      currency: string;
-      customerId: string;
-      paymentMethodId: string;
-      idempotencyKey: string;
-      metadata?: Record<string, any>;
-    }
+    data: Omit<Transaction, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'retryCount'>
   ): Promise<Transaction> {
-    const operationId = this.generateOperationId();
-    this.logger.info(`[${operationId}] Beginning transaction`, { 
-      type, 
-      customerId: data.customerId,
-      amount: data.amount,
-      currency: data.currency
-    });
-
+    const operationId = uuidv4().slice(0, 8);
+    
     try {
-      // Check for existing transaction with the same idempotency key
-      const existingTransaction = await this.store.findByIdempotencyKey(data.idempotencyKey);
-      if (existingTransaction) {
-        this.logger.info(`[${operationId}] Found existing transaction with idempotency key`, { 
-          idempotencyKey: data.idempotencyKey,
-          transactionId: existingTransaction.id
-        });
-        return existingTransaction;
+      // Check for existing transaction with same idempotency key
+      if (data.idempotencyKey) {
+        const existingTransaction = await this.store.getByIdempotencyKey(data.idempotencyKey);
+        
+        if (existingTransaction) {
+          this.logger.info(`[${operationId}] Found existing transaction with idempotency key ${data.idempotencyKey}`, {
+            transactionId: existingTransaction.id,
+            status: existingTransaction.status
+          });
+          
+          return existingTransaction;
+        }
       }
-
-      // Check idempotency
-      await this.idempotencyManager.checkAndLock(data.idempotencyKey, {
-        type,
-        amount: data.amount,
-        currency: data.currency,
-        customerId: data.customerId,
-        paymentMethodId: data.paymentMethodId
-      });
-
+      
+      // Create new transaction
       const transaction: Transaction = {
         id: uuidv4(),
         type,
         status: TransactionStatus.PENDING,
-        ...data,
         retryCount: 0,
         createdAt: new Date(),
-        updatedAt: new Date()
+        updatedAt: new Date(),
+        ...data
       };
-
-      // Acquire lock for the new transaction
-      await this.acquireLock(transaction.id);
-
-      try {
-        await this.store.save(transaction);
-        
-        // Associate transaction with idempotency key
-        await this.idempotencyManager.associateResource(
-          data.idempotencyKey, 
-          transaction.id, 
-          'transaction'
-        );
-        
-        this.logger.info(`[${operationId}] Transaction created`, { 
-          transactionId: transaction.id, 
-          status: transaction.status 
+      
+      this.logger.info(`[${operationId}] Creating new transaction`, {
+        transactionId: transaction.id,
+        type,
+        amount: transaction.amount,
+        currency: transaction.currency
+      });
+      
+      // Save transaction
+      await this.store.save(transaction);
+      
+      // Emit event
+      if (this.eventEmitter) {
+        await this.eventEmitter.emit('transaction.created', {
+          transactionId: transaction.id,
+          type,
+          amount: transaction.amount,
+          currency: transaction.currency,
+          status: transaction.status,
+          timestamp: transaction.createdAt
         });
-        
-        // Emit transaction created event
-        if (this.eventEmitter) {
-          await this.eventEmitter.emit('transaction.created', {
-            transactionId: transaction.id,
-            customerId: transaction.customerId,
-            type: transaction.type,
-            amount: transaction.amount,
-            currency: transaction.currency
-          });
-        }
-        
-        return transaction;
-      } catch (error) {
-        // Release lock if saving fails
-        await this.releaseLock(transaction.id);
-        throw error;
-      }
-    } catch (error) {
-      if (error.message === 'Duplicate request' || error.code === ErrorCode.DUPLICATE_REQUEST) {
-        throw errorHandler.createError(
-          'Duplicate transaction request',
-          ErrorCode.DUPLICATE_REQUEST,
-          { idempotencyKey: data.idempotencyKey }
-        );
       }
       
-      this.logger.error(`[${operationId}] Transaction creation failed`, { 
-        error, 
-        type, 
-        customerId: data.customerId 
-      });
+      return transaction;
+    } catch (error) {
+      this.logger.error(`[${operationId}] Failed to create transaction`, { error });
       
       throw errorHandler.wrapError(
         error,
-        'Failed to begin transaction',
+        'Failed to create transaction',
         ErrorCode.INTERNAL_ERROR,
-        { type, customerId: data.customerId }
+        { type, ...data }
       );
     }
   }
-
-  async updateTransactionStatus(
-    transactionId: string,
-    status: TransactionStatus,
-    error?: TransactionError
+  
+  /**
+   * Handle transaction error with retry/recovery
+   * @param id Transaction ID
+   * @param error Error that occurred
+   */
+  async handleTransactionError(
+    id: string,
+    error: TransactionError
   ): Promise<Transaction> {
-    const operationId = this.generateOperationId();
-    this.logger.info(`[${operationId}] Updating transaction status`, { 
-      transactionId, 
-      newStatus: status 
-    });
+    const operationId = uuidv4().slice(0, 8);
     
     try {
-      // Acquire lock before updating
-      await this.acquireLock(transactionId);
-      
-      try {
-        const transaction = await this.getTransaction(transactionId);
-        if (!transaction) {
-          throw errorHandler.createError(
-            'Transaction not found',
-            ErrorCode.TRANSACTION_NOT_FOUND,
-            { transactionId }
-          );
-        }
-
-        // Validate state transition
-        this.validateStateTransition(transaction.status, status);
-
-        const updatedTransaction = {
-          ...transaction,
-          status,
-          error,
-          updatedAt: new Date(),
-          ...(status === TransactionStatus.COMPLETED && { completedAt: new Date() }),
-          ...(status === TransactionStatus.FAILED && { failedAt: new Date() })
-        };
-
-        await this.store.save(updatedTransaction);
-        
-        this.logger.info(`[${operationId}] Transaction status updated`, { 
-          transactionId, 
-          oldStatus: transaction.status,
-          newStatus: status 
-        });
-        
-        // Emit transaction status changed event
-        if (this.eventEmitter) {
-          await this.eventEmitter.emit('transaction.status_changed', {
-            transactionId,
-            oldStatus: transaction.status,
-            newStatus: status,
-            error: error ? { 
-              code: error.code,
-              message: error.message 
-            } : undefined
-          });
-        }
-        
-        // Handle idempotency key release if transaction is in terminal state
-        if (this.isTerminalState(status) && transaction.idempotencyKey) {
-          await this.idempotencyManager.releaseLock(transaction.idempotencyKey);
-          this.logger.debug(`[${operationId}] Released idempotency lock`, { 
-            transactionId, 
-            idempotencyKey: transaction.idempotencyKey 
-          });
-        }
-        
-        // Release transaction lock if in terminal state
-        if (this.isTerminalState(status)) {
-          await this.releaseLock(transactionId);
-        }
-        
-        return updatedTransaction;
-      } catch (error) {
-        // Release lock if update fails
-        await this.releaseLock(transactionId);
-        throw error;
-      }
-    } catch (error) {
-      this.logger.error(`[${operationId}] Failed to update transaction status`, { 
-        error, 
-        transactionId, 
-        status 
+      this.logger.info(`[${operationId}] Handling error for transaction ${id}`, {
+        errorCode: error.code,
+        retryable: error.retryable,
+        recoverable: error.recoverable
       });
       
-      throw errorHandler.wrapError(
-        error,
-        'Failed to update transaction status',
-        ErrorCode.INTERNAL_ERROR,
-        { transactionId, status }
-      );
-    }
-  }
-
-  async handleTransactionError(
-    transactionId: string,
-    error: TransactionFailedError
-  ): Promise<Transaction> {
-    const operationId = this.generateOperationId();
-    try {
-      // Acquire lock before handling error
-      await this.acquireLock(transactionId);
-      
-      try {
-        this.logger.info(`[${operationId}] Handling transaction error`, { 
-          transactionId, 
-          errorCode: error.code,
-          retryable: error.retryable,
-          recoverable: error.recoverable
-        });
-        
-        const transaction = await this.getTransaction(transactionId);
-        if (!transaction) {
-          throw errorHandler.createError(
-            'Transaction not found',
-            ErrorCode.TRANSACTION_NOT_FOUND,
-            { transactionId }
-          );
-        }
-
-        // Handle retryable errors
-        if (error.retryable && transaction.retryCount < this.retryManager.getMaxRetries()) {
-          this.logger.info(`[${operationId}] Scheduling transaction retry`, { 
-            transactionId, 
-            retryCount: transaction.retryCount 
-          });
-          
-          // Release lock before scheduling retry (retry process will acquire lock again)
-          await this.releaseLock(transactionId);
-          
-          return this.retryManager.scheduleRetry(transaction);
-        }
-
-        // Handle recoverable errors
-        if (error.recoverable) {
-          this.logger.info(`[${operationId}] Initiating transaction recovery`, { transactionId });
-          
-          // Release lock before recovery (recovery process will acquire lock again)
-          await this.releaseLock(transactionId);
-          
-          return this.recoveryManager.initiateRecovery(transaction, error);
-        }
-
-        // Handle terminal errors
-        this.logger.info(`[${operationId}] Marking transaction as failed`, { 
-          transactionId, 
-          errorCode: error.code 
-        });
-        
-        return this.updateTransactionStatus(
-          transactionId,
-          TransactionStatus.FAILED,
-          {
-            code: error.code,
-            message: error.message,
-            recoverable: error.recoverable,
-            retryable: error.retryable,
-            details: error.details
-          }
+      // Get transaction
+      const transaction = await this.store.get(id);
+      if (!transaction) {
+        throw errorHandler.createError(
+          `Transaction not found: ${id}`,
+          ErrorCode.TRANSACTION_NOT_FOUND,
+          { transactionId: id }
         );
-      } catch (error) {
-        // Release lock if handling fails
-        await this.releaseLock(transactionId);
-        throw error;
       }
+      
+      // Check if retryable and we have a retry manager
+      if (error.retryable && this.retryManager) {
+        this.logger.info(`[${operationId}] Error is retryable, scheduling retry for transaction ${id}`);
+        return this.retryManager.scheduleRetry(transaction, error);
+      }
+      
+      // If recoverable and we have a recovery manager
+      if (error.recoverable && this.recoveryManager) {
+        this.logger.info(`[${operationId}] Error is recoverable, initiating recovery for transaction ${id}`);
+        return this.recoveryManager.initiateRecovery(transaction, error);
+      }
+      
+      // Otherwise, mark as failed
+      this.logger.info(`[${operationId}] Error is not retryable or recoverable, marking transaction ${id} as failed`);
+      
+      return this.updateTransactionStatus(
+        id, 
+        TransactionStatus.FAILED,
+        {
+          failureReason: error.code,
+          failureMessage: error.message,
+          failureDetails: error.details
+        }
+      );
     } catch (error) {
-      this.logger.error(`[${operationId}] Failed to handle transaction error`, { 
-        error, 
-        transactionId 
-      });
+      this.logger.error(`[${operationId}] Failed to handle transaction error for ${id}`, { error });
       
       throw errorHandler.wrapError(
         error,
         'Failed to handle transaction error',
         ErrorCode.INTERNAL_ERROR,
-        { transactionId }
+        { transactionId: id }
       );
     }
   }
-
-  async rollbackTransaction(transactionId: string): Promise<Transaction> {
-    const operationId = this.generateOperationId();
+  
+  /**
+   * Get a transaction by ID
+   * @param id Transaction ID
+   */
+  async getTransaction(id: string): Promise<Transaction | null> {
     try {
-      // Acquire lock before rollback
-      await this.acquireLock(transactionId);
-      
-      try {
-        this.logger.info(`[${operationId}] Rolling back transaction`, { transactionId });
-        
-        const transaction = await this.getTransaction(transactionId);
-        if (!transaction) {
-          throw errorHandler.createError(
-            'Transaction not found',
-            ErrorCode.TRANSACTION_NOT_FOUND,
-            { transactionId }
-          );
-        }
-
-        // Check if transaction can be rolled back
-        if (this.isTerminalState(transaction.status)) {
-          throw errorHandler.createError(
-            `Cannot rollback transaction in ${transaction.status} state`,
-            ErrorCode.TRANSACTION_INVALID_STATE,
-            { transactionId, status: transaction.status }
-          );
-        }
-
-        // Implement rollback logic based on transaction type
-        switch (transaction.type) {
-          case TransactionType.PAYMENT:
-            await this.rollbackPayment(transaction);
-            break;
-          case TransactionType.REFUND:
-            await this.rollbackRefund(transaction);
-            break;
-          case TransactionType.CHARGEBACK:
-            await this.rollbackChargeback(transaction);
-            break;
-          default:
-            throw errorHandler.createError(
-              `Unsupported transaction type: ${transaction.type}`,
-              ErrorCode.VALIDATION_ERROR,
-              { transactionId, type: transaction.type }
-            );
-        }
-
-        return this.updateTransactionStatus(
-          transactionId,
-          TransactionStatus.ROLLED_BACK
-        );
-      } catch (error) {
-        // Release lock if rollback fails
-        await this.releaseLock(transactionId);
-        throw error;
-      }
+      return this.store.get(id);
     } catch (error) {
-      this.logger.error(`[${operationId}] Failed to rollback transaction`, { 
-        error, 
-        transactionId 
-      });
+      this.logger.error(`Failed to get transaction ${id}`, { error });
       
-      throw errorHandler.wrapError(
-        error,
-        'Failed to rollback transaction',
-        ErrorCode.INTERNAL_ERROR,
-        { transactionId }
-      );
-    }
-  }
-
-  async getTransaction(transactionId: string): Promise<Transaction | null> {
-    try {
-      const transaction = await this.store.get(transactionId);
-      return transaction;
-    } catch (error) {
       throw errorHandler.wrapError(
         error,
         'Failed to get transaction',
         ErrorCode.INTERNAL_ERROR,
-        { transactionId }
+        { transactionId: id }
       );
     }
   }
-
-  async listTransactions(
+  
+  /**
+   * Get transactions for a customer
+   * @param customerId Customer ID
+   * @param options Query options
+   */
+  async getTransactions(
     customerId: string,
     options: {
       status?: TransactionStatus;
@@ -436,152 +224,22 @@ export class TransactionManager {
     try {
       return this.store.query(customerId, options);
     } catch (error) {
+      this.logger.error(`Failed to get transactions for customer ${customerId}`, { error });
+      
       throw errorHandler.wrapError(
         error,
-        'Failed to list transactions',
+        'Failed to get transactions',
         ErrorCode.INTERNAL_ERROR,
         { customerId, options }
       );
     }
   }
-
-  async checkTransactionLimits(
-    customerId: string,
-    amount: number,
-    currency: string
-  ): Promise<boolean> {
-    // This would typically call into the customer service to check limits
-    // Placeholder implementation
-    return true;
-  }
-
+  
   /**
-   * Acquire a lock on a transaction to prevent concurrent modifications
+   * Validate state transition
+   * @param currentState Current state
+   * @param newState New state
    */
-  private async acquireLock(transactionId: string): Promise<boolean> {
-    // Check if lock exists and is still valid
-    const existingLock = this.locks.get(transactionId);
-    if (existingLock) {
-      const now = new Date();
-      
-      // If lock is owned by this instance, renew it
-      if (existingLock.owner === this.instanceId) {
-        existingLock.renewed = now;
-        existingLock.expiresAt = new Date(now.getTime() + this.lockExpirationMs);
-        this.logger.debug(`Renewed transaction lock for ${transactionId}`);
-        return true;
-      }
-      
-      // If lock has expired, take it over
-      if (now > existingLock.expiresAt) {
-        this.logger.warn(`Taking over expired lock for transaction ${transactionId}`, {
-          previousOwner: existingLock.owner,
-          expiredAt: existingLock.expiresAt
-        });
-      } else {
-        // Lock is valid and owned by someone else
-        throw errorHandler.createError(
-          'Transaction is locked by another process',
-          ErrorCode.TRANSACTION_LOCKED,
-          { 
-            transactionId,
-            lockedSince: existingLock.acquiredAt,
-            lockExpiration: existingLock.expiresAt
-          }
-        );
-      }
-    }
-    
-    // Create new lock
-    const now = new Date();
-    const lock: TransactionLock = {
-      transactionId,
-      acquiredAt: now,
-      expiresAt: new Date(now.getTime() + this.lockExpirationMs),
-      owner: this.instanceId
-    };
-    
-    this.locks.set(transactionId, lock);
-    this.logger.debug(`Acquired transaction lock for ${transactionId}`);
-    
-    // Set up automatic lock renewal
-    this.setupLockRenewal(transactionId);
-    
-    // Emit lock acquired event
-    if (this.eventEmitter) {
-      this.eventEmitter.emit('transaction.lock_acquired', {
-        transactionId,
-        owner: this.instanceId,
-        acquiredAt: now
-      }).catch(error => {
-        this.logger.error('Failed to emit lock acquired event', { error });
-      });
-    }
-    
-    return true;
-  }
-
-  /**
-   * Release a lock on a transaction
-   */
-  private async releaseLock(transactionId: string): Promise<void> {
-    const lock = this.locks.get(transactionId);
-    if (lock && lock.owner === this.instanceId) {
-      this.locks.delete(transactionId);
-      
-      // Clear any renewal timer
-      const timer = this.renewalTimers.get(transactionId);
-      if (timer) {
-        clearTimeout(timer);
-        this.renewalTimers.delete(transactionId);
-      }
-      
-      this.logger.debug(`Released transaction lock for ${transactionId}`);
-      
-      // Emit lock released event
-      if (this.eventEmitter) {
-        this.eventEmitter.emit('transaction.lock_released', {
-          transactionId,
-          owner: this.instanceId
-        }).catch(error => {
-          this.logger.error('Failed to emit lock released event', { error });
-        });
-      }
-    }
-  }
-
-  /**
-   * Setup automatic lock renewal to prevent expiration during long operations
-   */
-  private setupLockRenewal(transactionId: string): void {
-    // Clear any existing timer
-    const existingTimer = this.renewalTimers.get(transactionId);
-    if (existingTimer) {
-      clearTimeout(existingTimer);
-    }
-    
-    // Set up new timer
-    const timer = setTimeout(async () => {
-      try {
-        const lock = this.locks.get(transactionId);
-        if (lock && lock.owner === this.instanceId) {
-          const now = new Date();
-          lock.renewed = now;
-          lock.expiresAt = new Date(now.getTime() + this.lockExpirationMs);
-          this.logger.debug(`Auto-renewed transaction lock for ${transactionId}`);
-          
-          // Set up next renewal
-          this.setupLockRenewal(transactionId);
-        }
-      } catch (error) {
-        this.logger.error(`Failed to renew lock for transaction ${transactionId}`, { error });
-      }
-    }, this.lockRenewalIntervalMs);
-    
-    // Store timer reference for cleanup
-    this.renewalTimers.set(transactionId, timer);
-  }
-
   private validateStateTransition(
     currentState: TransactionStatus,
     newState: TransactionStatus
@@ -590,32 +248,37 @@ export class TransactionManager {
     const validTransitions: Record<TransactionStatus, TransactionStatus[]> = {
       [TransactionStatus.PENDING]: [
         TransactionStatus.PROCESSING,
+        TransactionStatus.COMPLETED,
         TransactionStatus.FAILED,
-        TransactionStatus.ROLLED_BACK
+        TransactionStatus.RECOVERY_PENDING
       ],
       [TransactionStatus.PROCESSING]: [
         TransactionStatus.COMPLETED,
         TransactionStatus.FAILED,
-        TransactionStatus.RECOVERY_PENDING,
-        TransactionStatus.ROLLED_BACK
+        TransactionStatus.RECOVERY_PENDING
       ],
       [TransactionStatus.COMPLETED]: [],
-      [TransactionStatus.FAILED]: [],
-      [TransactionStatus.ROLLED_BACK]: [],
+      [TransactionStatus.FAILED]: [
+        TransactionStatus.RECOVERY_PENDING
+      ],
       [TransactionStatus.RECOVERY_PENDING]: [
+        TransactionStatus.PROCESSING,
         TransactionStatus.RECOVERY_IN_PROGRESS,
         TransactionStatus.FAILED
       ],
       [TransactionStatus.RECOVERY_IN_PROGRESS]: [
         TransactionStatus.COMPLETED,
-        TransactionStatus.FAILED
+        TransactionStatus.FAILED,
+        TransactionStatus.RECOVERY_PENDING
       ]
     };
-
+    
+    // No state change is always valid
     if (currentState === newState) {
-      return; // No state change, always valid
+      return;
     }
-
+    
+    // Check if transition is valid
     if (!validTransitions[currentState]?.includes(newState)) {
       throw errorHandler.createError(
         `Invalid state transition from ${currentState} to ${newState}`,
@@ -625,33 +288,103 @@ export class TransactionManager {
     }
   }
 
-  private isTerminalState(status: TransactionStatus): boolean {
-    return [
-      TransactionStatus.COMPLETED,
-      TransactionStatus.FAILED,
-      TransactionStatus.ROLLED_BACK
-    ].includes(status);
-  }
-
-  private async rollbackPayment(transaction: Transaction): Promise<void> {
-    // Implement payment-specific rollback logic
-    this.logger.info('Rolling back payment transaction', { transactionId: transaction.id });
-    // Implementation depends on the payment provider logic
-  }
-
-  private async rollbackRefund(transaction: Transaction): Promise<void> {
-    // Implement refund-specific rollback logic
-    this.logger.info('Rolling back refund transaction', { transactionId: transaction.id });
-    // Implementation depends on the payment provider logic
-  }
-
-  private async rollbackChargeback(transaction: Transaction): Promise<void> {
-    // Implement chargeback-specific rollback logic
-    this.logger.info('Rolling back chargeback transaction', { transactionId: transaction.id });
-    // Implementation depends on the payment provider logic
-  }
-
-  private generateOperationId(): string {
-    return Math.random().toString(36).substring(2, 10);
-  }
-}
+  /**
+   * Update transaction status
+   * @param id Transaction ID
+   * @param status New status
+   * @param metadata Optional metadata to update
+   */
+  async updateTransactionStatus(
+    id: string,
+    status: TransactionStatus,
+    metadata?: Record<string, any>
+  ): Promise<Transaction> {
+    const operationId = uuidv4().slice(0, 8);
+    let lockId: string | undefined;
+    
+    try {
+      this.logger.info(`[${operationId}] Updating transaction ${id} status to ${status}`);
+      
+      // Try to acquire lock if locker is available
+      if (this.recordLocker) {
+        try {
+          lockId = await this.recordLocker.acquireLock(
+            id,
+            'transaction',
+            { 
+              waitTimeoutMs: this.lockTimeoutMs,
+              lockLevel: LockLevel.EXCLUSIVE
+            }
+          );
+          this.logger.debug(`[${operationId}] Acquired lock for transaction ${id}`);
+        } catch (lockError) {
+          this.logger.error(`[${operationId}] Failed to acquire lock for transaction ${id}`, { 
+            error: lockError 
+          });
+          // Continue without lock, but this is not optimal
+        }
+      }
+      
+      // Get transaction
+      const transaction = await this.store.get(id);
+      if (!transaction) {
+        throw errorHandler.createError(
+          `Transaction not found: ${id}`,
+          ErrorCode.TRANSACTION_NOT_FOUND,
+          { transactionId: id }
+        );
+      }
+      
+      // Validate state transition
+      this.validateStateTransition(transaction.status, status);
+      
+      // Update transaction
+      const updatedTransaction = {
+        ...transaction,
+        status,
+        updatedAt: new Date(),
+        metadata: {
+          ...transaction.metadata,
+          ...metadata
+        },
+        ...(status === TransactionStatus.COMPLETED && { completedAt: new Date() }),
+        ...(status === TransactionStatus.FAILED && { failedAt: new Date() })
+      };
+      
+      await this.store.save(updatedTransaction);
+      
+      // Emit event
+      if (this.eventEmitter) {
+        await this.eventEmitter.emit('transaction.status_changed', {
+          transactionId: id,
+          oldStatus: transaction.status,
+          newStatus: status,
+          timestamp: updatedTransaction.updatedAt
+        });
+      }
+      
+      this.logger.info(`[${operationId}] Updated transaction ${id} status from ${transaction.status} to ${status}`);
+      
+      return updatedTransaction;
+    } catch (error) {
+      this.logger.error(`[${operationId}] Failed to update transaction ${id} status`, { error });
+      
+      throw errorHandler.wrapError(
+        error,
+        `Failed to update transaction status to ${status}`,
+        ErrorCode.INTERNAL_ERROR,
+        { transactionId: id, status }
+      );
+    } finally {
+      // Release lock if acquired
+      if (this.recordLocker && lockId) {
+        try {
+          await this.recordLocker.releaseLock(id, 'transaction', lockId);
+          this.logger.debug(`[${operationId}] Released lock for transaction ${id}`);
+        } catch (releaseError) {
+          this.logger.error(`[${operationId}] Failed to release lock for transaction ${id}`, {
+            error: releaseError
+          });
+        }
+      }
+    }
